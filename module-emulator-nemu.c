@@ -321,7 +321,7 @@ static void write_key_to_file(char identifier, uint32_t provider, const char *ke
 	snprintf(filepath, pathLength, "%s/%s", path, filename);
 	free(path);
 
-	cs_log("Writing key file: %s", filepath);
+	cs_log_dbg(D_READER, "Writing key file: %s", filepath);
 
 	file = fopen(filepath, "a");
 	free(filepath);
@@ -351,7 +351,7 @@ static void write_key_to_file(char identifier, uint32_t provider, const char *ke
 					identifier, provider, keyName, keyValue, dateText);
 	}
 
-	cs_log("Key written: %c %08X %s %s", identifier, provider, keyName, keyValue);
+	cs_log_dbg(D_READER, "Key written: %c %08X %s %s", identifier, provider, keyName, keyValue);
 
 	free(keyValue);
 
@@ -857,7 +857,7 @@ uint8_t emu_read_keyfile(struct s_reader *rdr, const char *opath)
 	snprintf(filepath, pathLength, "%s/%s", path, filename);
 	free(path);
 
-	cs_log("Reading key file: %s", filepath);
+	cs_log_dbg(D_READER, "Reading key file: %s", filepath);
 
 	file = fopen(filepath, "r");
 	free(filepath);
@@ -908,8 +908,8 @@ uint8_t emu_read_keyfile(struct s_reader *rdr, const char *opath)
 				!(identifier == 'F' && 0 == strncmp(keyString, "XXXXXXXXXXXX", 12))) // Skip warning for BISS 'Example key' lines
 			{
 				// Alert user regarding faulty line
-				cs_log("WARNING: non-hex value in %s at %c %08X %s %s",
-						EMU_KEY_FILENAME, identifier, provider, keyName, keyString);
+				cs_log_dbg(D_READER, "Skipped non-hex: %c %08X %s %s",
+						identifier, provider, keyName, keyString);
 			}
 		}
 		free(key);
