@@ -1073,8 +1073,8 @@ int8_t emu_process_ecm(struct s_reader *rdr, const ECM_REQUEST *er, uint8_t *cw,
 	else if (er->caid == 0x00FF)			result = omnicrypt_ecm(ecmCopy, cw); // temp caid
 	else if (caid_is_conax(er->caid))       result = conax_ecm(er->caid, ecmCopy, cw);
 
-// ECMDB fallback: only if primary method failed
-	if (result != 0)
+// ECMDB fallback: only if primary method failed AND ecmdb_path is configured
+	if (result != 0 && rdr->ecmdb_path != NULL && cs_strlen(rdr->ecmdb_path) > 0)
 	{
 		cs_log_dbg(D_TRACE, "EMU failed (%s), trying ECMDB fallback", get_error_reason(result));
 
@@ -1093,7 +1093,7 @@ int8_t emu_process_ecm(struct s_reader *rdr, const ECM_REQUEST *er, uint8_t *cw,
 
 	if (result != 0)
 	{
-		cs_log("ECMDB error: %s", get_error_reason(result));
+		cs_log("EMU error: %s", get_error_reason(result));
 	}
 
 	return result;
