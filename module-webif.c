@@ -1739,6 +1739,9 @@ static char *send_ncam_config_dvbapi(struct templatevars *vars, struct uriparams
 	if(cfg.dvbapi_listenport > 0)
 		{ tpl_printf(vars, TPLADD, "LISTENPORT", "%d", cfg.dvbapi_listenport); }
 
+	if(IP_ISSET(cfg.dvbapi_srvip))
+		{ tpl_addVar(vars, TPLADD, "SERVERIP", cs_inet_ntoa(cfg.dvbapi_srvip)); }
+
 	return tpl_getTpl(vars, "CONFIGDVBAPI");
 }
 #endif
@@ -4874,7 +4877,12 @@ static char *send_ncam_user_config(struct templatevars *vars, struct uriparams *
 			if(latestclient != NULL)
 			{
 				connected_users += 1;
-				tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(latestclient->ip));
+				if(IP_ISSET(latestclient->ip))
+					{ tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(latestclient->ip)); }
+				else if(latestclient->login > latestclient->logout)
+					{ tpl_addVar(vars, TPLADD, "CLIENTIP", "camd.socket"); }
+				else
+					{ tpl_addVar(vars, TPLADD, "CLIENTIP", ""); }
 				if(isactive > 0 || conn > 0)
 				{
 					tpl_printf(vars, TPLADD, "CLIENTPORT", "%d", latestclient->port);
@@ -5733,7 +5741,6 @@ static char *send_ncam_logpoll(struct templatevars * vars, struct uriparams * pa
 
 static char *send_ncam_status(struct templatevars * vars, struct uriparams * params, int32_t apicall)
 {
-	int32_t i;
 	const char *usr;
 	int32_t lsec, isec, chsec, con, cau = 0;
 	time_t now = time((time_t *)0);
@@ -5892,7 +5899,7 @@ static char *send_ncam_status(struct templatevars * vars, struct uriparams * par
 
 	cs_readlock(__func__, &readerlist_lock);
 	cs_readlock(__func__, &clientlist_lock);
-	for(i = 0, cl = first_client; cl ; cl = cl->next, i++)
+	for(cl = first_client; cl ; cl = cl->next)
 	{
 #if defined(MODULE_CCCAM) && defined(CS_CACHEEX_AIO)
 		struct cc_data *cc = cl->cc;
@@ -6147,7 +6154,18 @@ static char *send_ncam_status(struct templatevars * vars, struct uriparams * par
 						else { tpl_addVar(vars, TPLADD, "CLIENTCRYPTED", ""); }
 					}
 					else { tpl_printf(vars, TPLADD, "CLIENTCRYPTED", "%d", cl->crypted); }
-					tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(cl->ip));
+
+					if(cl->typ == 'r' && cl->reader && !is_network_reader(cl->reader))
+						{ tpl_addVar(vars, TPLADD, "CLIENTIP", "local"); }
+					else if(IP_ISSET(cl->ip))
+						{ tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(cl->ip)); }
+					else if((cl->typ == 'p' || cl->typ == 'r') && cl->reader && cl->reader->tcp_connected)
+						{ tpl_addVar(vars, TPLADD, "CLIENTIP", "camd.socket"); }
+					else if(cl->typ == 'c' && cl->login > cl->logout)
+						{ tpl_addVar(vars, TPLADD, "CLIENTIP", "camd.socket"); }
+					else
+						{ tpl_addVar(vars, TPLADD, "CLIENTIP", ""); }
+
 					tpl_printf(vars, TPLADD, "CLIENTPORT", "%d", cl->port);
 					const char *proto = client_get_proto(cl);
 #ifdef CS_CACHEEX_AIO
@@ -6853,7 +6871,7 @@ static char *send_ncam_status(struct templatevars * vars, struct uriparams * par
 	if(cfg.http_status_log || is_touch)
 	{
 		// Debuglevel Selector
-		int32_t lvl;
+		int32_t i, lvl;
 		for(i = 0; i < MAX_DEBUG_LEVELS; i++)
 		{
 			lvl = 1 << i;
@@ -7106,6 +7124,7 @@ static char *send_ncam_services(struct templatevars * vars, struct uriparams * p
 	while(sidtab != NULL)
 	{
 		tpl_addVar(vars, TPLADD, "SID", "");
+		tpl_printf(vars, TPLADD, "SERVICENUM", "%d", counter + 1);
 		if((strcmp(getParam(params, "service"), sidtab->label) == 0) && (strcmp(getParam(params, "action"), "list") == 0))
 		{
 			tpl_addVar(vars, TPLADD, "SIDCLASS", "sidlist");
@@ -8188,7 +8207,10 @@ static char *send_ncam_cacheex(struct templatevars * vars, struct uriparams * pa
 	char *pushing = "<IMG SRC=\"image?i=ICARRR\" ALT=\"Pushing\">";
 	char *rowvariable = "";
 
-	int16_t i, written = 0;
+	int16_t written = 0;
+#ifdef CS_CACHEEX_AIO
+	int16_t i = 0;
+#endif
 	struct s_client *cl;
 	time_t now = time((time_t *)0);
 	int delimiter=0;
@@ -8215,9 +8237,10 @@ static char *send_ncam_cacheex(struct templatevars * vars, struct uriparams * pa
 	const char *cacheex_name_link_tpl = NULL;
 	tpl_addVar(vars, TPLADD, "CLIENTDESCRIPTION", "");
 
-	for(i = 0, cl = first_client; cl ; cl = cl->next, i++)
+	for(cl = first_client; cl ; cl = cl->next)
 	{
 #ifdef CS_CACHEEX_AIO
+		i++;
 		char classname[9];
 		snprintf(classname, 8, "class%02d", i) < 0 ? abort() : (void)0;
 		classname[8] = '\0';
@@ -8255,7 +8278,12 @@ static char *send_ncam_cacheex(struct templatevars * vars, struct uriparams * pa
 				}
 			}
 
-			tpl_addVar(vars, TPLADD, "IP", cs_inet_ntoa(cl->ip));
+			if(IP_ISSET(cl->ip))
+				{ tpl_addVar(vars, TPLADD, "IP", cs_inet_ntoa(cl->ip)); }
+			else if(cl->login > cl->logout)
+				{ tpl_addVar(vars, TPLADD, "IP", "camd.socket"); }
+			else
+				{ tpl_addVar(vars, TPLADD, "IP", ""); }
 			tpl_printf(vars, TPLADD, "NODE", "%" PRIu64 "X", get_cacheex_node(cl));
 			tpl_addVar(vars, TPLADD, "LEVEL", level[cl->account->cacheex.mode]);
 			tpl_printf(vars, TPLADD, "PUSH", "%d", cl->account->cwcacheexpush);
@@ -8306,7 +8334,12 @@ static char *send_ncam_cacheex(struct templatevars * vars, struct uriparams * pa
 				}
 			}
 
-			tpl_addVar(vars, TPLADD, "IP", cs_inet_ntoa(cl->ip));
+			if(IP_ISSET(cl->ip))
+				{ tpl_addVar(vars, TPLADD, "IP", cs_inet_ntoa(cl->ip)); }
+			else if(cl->reader && cl->reader->tcp_connected)
+				{ tpl_addVar(vars, TPLADD, "IP", "camd.socket"); }
+			else
+				{ tpl_addVar(vars, TPLADD, "IP", ""); }
 			tpl_printf(vars, TPLADD, "NODE", "%" PRIu64 "X", get_cacheex_node(cl));
 			tpl_addVar(vars, TPLADD, "LEVEL", level[cl->reader->cacheex.mode]);
 			tpl_printf(vars, TPLADD, "PUSH", "%d", cl->cwcacheexpush);
@@ -8341,7 +8374,12 @@ static char *send_ncam_cacheex(struct templatevars * vars, struct uriparams * pa
 				tpl_addVar(vars, TPLADD, "NAME", "csp");
 			}
 
-			tpl_addVar(vars, TPLADD, "IP", cs_inet_ntoa(cl->ip));
+			if(IP_ISSET(cl->ip))
+				{ tpl_addVar(vars, TPLADD, "IP", cs_inet_ntoa(cl->ip)); }
+			else if(cl->login > cl->logout)
+				{ tpl_addVar(vars, TPLADD, "IP", "camd.socket"); }
+			else
+				{ tpl_addVar(vars, TPLADD, "IP", ""); }
 			tpl_addVar(vars, TPLADD, "NODE", "csp");
 
 			if(cl->cwcacheexping)
@@ -8553,13 +8591,12 @@ static char *send_ncam_api(struct templatevars * vars, FILE * f, struct uriparam
 	}
 	else if(strcmp(getParam(params, "part"), "ecmhistory") == 0)
 	{
-		int32_t i;
 		int32_t isec;
 		int32_t shown;
 		time_t now = time((time_t *)0);
 		const char *usr;
 		struct s_client *cl;
-		for(i = 0, cl = first_client; cl ; cl = cl->next, i++)
+		for(cl = first_client; cl ; cl = cl->next)
 		{
 			if(cl->wihidden != 1)
 			{

@@ -390,6 +390,7 @@ typedef uint8_t uint8_t;
 #ifdef CS_CACHEEX
 #ifdef CS_CACHEEX_AIO
 #define CS_AIO_VERSION "9.2.6"
+#define CS_AIO_VERSION_LEN		(sizeof(CS_AIO_VERSION))
 #endif
 #endif
 #ifndef CS_TARGET
@@ -1563,7 +1564,7 @@ typedef struct ce_csp_t
 	uint8_t         lg_only_remote_settings;
 	int32_t         feature_bitfield;
 	CAIDVALUETAB    cacheex_nopushafter_tab;
-	char            aio_version[12];
+	char            aio_version[CS_AIO_VERSION_LEN];
 #endif
 } CECSP;
 
@@ -2459,6 +2460,7 @@ struct s_config
 	int8_t      dvbapi_pmtmode;
 	int8_t      dvbapi_requestmode;
 	int32_t     dvbapi_listenport;                  // TCP port to listen instead of camd.socket (network mode, default=0 -> disabled)
+	IN_ADDR_T	dvbapi_srvip;
 	SIDTABS     dvbapi_sidtabs;
 	int32_t     dvbapi_delayer;                     // delayer ms, minimum time to write cw
 	int8_t      dvbapi_ecminfo_file;                // Enable or disable ecm.info file creation
@@ -2760,6 +2762,16 @@ static inline bool caid_is_dre(uint16_t caid) { return caid == 0x4AE0 || caid ==
 static inline bool caid_is_streamguard(uint16_t caid) { return caid == 0x4AD2 || caid == 0x4AD3; }
 static inline bool caid_is_dvn(uint16_t caid) { return caid == 0x4A30; }
 static inline bool caid_is_tongfang(uint16_t caid) { return (caid == 0x4A02) || (caid >= 0x4B00 && caid <= 0x4BFF); }
+#if defined(WITH_EXTENDED_CW) || defined(MODULE_STREAMRELAY)
+static inline bool select_csa_alt(const ECM_REQUEST *er) {
+	return (caid_is_videoguard(er->caid) && er->ecm[4] != 0 && (er->ecm[2] - er->ecm[4]) == 4);
+}
+#endif
+#ifdef MODULE_STREAMRELAY
+static inline uint8_t get_ecm_mode(const ECM_REQUEST *er) {
+	return (caid_is_videoguard(er->caid) && er->ecmlen >= 4) ? (er->ecm[er->ecmlen - 1] & 0x0F) : 0;
+}
+#endif
 const char *get_cardsystem_desc_by_caid(uint16_t caid);
 
 #ifdef WITH_EMU

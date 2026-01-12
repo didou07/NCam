@@ -29,6 +29,8 @@
 #include "cscrypt/md5.h"
 extern int32_t exit_oscam;
 
+static int32_t dvbapi_listenport_active = 0;
+
 #if defined (__CYGWIN__)
 #define F_NOTIFY 0
 #define F_SETSIG 0
@@ -200,7 +202,7 @@ static const char *get_extension_descriptor_txt(uint8_t extension_tag)
 
 void flush_read_fd(int32_t demux_id, int32_t num, int fd)
 {
-	if(!cfg.dvbapi_listenport && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX)
+	if(!dvbapi_listenport_active && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX)
 	{
 		cs_log_dbg(D_DVBAPI,"Demuxer %d flushing stale input data of filter %d (fd:%d)", demux_id, num + 1, fd);
 
@@ -955,7 +957,7 @@ int32_t dvbapi_set_filter(int32_t demux_id, int32_t api, uint16_t pid, uint16_t 
 	{
 		case DVBAPI_3:
 		{
-			if(cfg.dvbapi_listenport || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
+			if(dvbapi_listenport_active || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
 			{
 				ret = filterfd = DUMMY_FD;
 			}
@@ -1002,7 +1004,7 @@ int32_t dvbapi_set_filter(int32_t demux_id, int32_t api, uint16_t pid, uint16_t 
 			{
 				memcpy(sFP2.filter.filter, filt, 16);
 				memcpy(sFP2.filter.mask, mask, 16);
-				if(cfg.dvbapi_listenport || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
+				if(dvbapi_listenport_active || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
 				{
 					ret = dvbapi_net_send(DVBAPI_DMX_SET_FILTER,
 								demux[demux_id].socket_fd,
@@ -1194,7 +1196,7 @@ static int32_t dvbapi_detect_api(void)
 	selected_api = COOLAPI;
 	selected_box = BOX_INDEX_COOLSTREAM;
 	disable_pmt_files = 1;
-	cfg.dvbapi_listenport = 0;
+	dvbapi_listenport_active = 0;
 	cs_log("Detected Coolstream API");
 	return 1;
 #else
@@ -1202,7 +1204,8 @@ static int32_t dvbapi_detect_api(void)
 	{
 		selected_api = DVBAPI_3;
 		selected_box = BOX_INDEX_DREAMBOX_DVBAPI3;
-		if(cfg.dvbapi_listenport)
+		dvbapi_listenport_active = dvbapi_listenport_active;
+		if(dvbapi_listenport_active)
 		{
 			cs_log("Using TCP listen socket, API forced to DVBAPIv3 (%d), userconfig boxtype: %d",
 				selected_api, cfg.dvbapi_boxtype);
@@ -1218,14 +1221,14 @@ static int32_t dvbapi_detect_api(void)
 	{
 		selected_api = DVBAPI_3;
 		selected_box = BOX_INDEX_QBOXHD;
-		cfg.dvbapi_listenport = 0;
+		dvbapi_listenport_active = 0;
 		disable_pmt_files = 1;
 		cs_log("Using SamyGO dvbapi v0.1");
 		return 1;
 	}
 	else
 	{
-		cfg.dvbapi_listenport = 0;
+		dvbapi_listenport_active = 0;
 	}
 
 	int32_t i = 0, n = 0, devnum = -1, filtercount = 0;
@@ -1405,7 +1408,7 @@ int32_t dvbapi_open_device(int32_t type, int32_t num, int32_t adapter)
 	int32_t ca_offset = 0;
 	char device_path[128], device_path2[128];
 
-	if(cfg.dvbapi_listenport || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
+	if(dvbapi_listenport_active || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
 	{
 		return DUMMY_FD;
 	}
@@ -1588,7 +1591,7 @@ int32_t dvbapi_stop_filternum(int32_t demux_id, int32_t num, uint32_t msgid)
 			{
 				case DVBAPI_3:
 				{
-					if(cfg.dvbapi_listenport || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
+					if(dvbapi_listenport_active || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
 					{
 						retfilter = dvbapi_net_send(DVBAPI_DMX_STOP,
 									demux[demux_id].socket_fd,
@@ -1668,7 +1671,7 @@ int32_t dvbapi_stop_filternum(int32_t demux_id, int32_t num, uint32_t msgid)
 			try++;
 
 			// on bad filterfd dont try to close!
-			if(!cfg.dvbapi_listenport && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX && errno != 9)
+			if(!dvbapi_listenport_active && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX && errno != 9)
 			{
 				if(selected_api == STAPI || selected_api == GXAPI)
 				{
@@ -2574,6 +2577,11 @@ void dvbapi_set_pid(int32_t demux_id, int32_t num, uint32_t idx, bool enable, bo
 							}
 							else
 							{
+								if(ca_soft_csa[demux_id])
+								{
+									continue;
+								}
+
 								currentfd = ca_fd[i];
 								if(currentfd <= 0)
 								{
@@ -2583,13 +2591,10 @@ void dvbapi_set_pid(int32_t demux_id, int32_t num, uint32_t idx, bool enable, bo
 
 								if(currentfd > 0)
 								{
-									if(!ca_soft_csa[demux_id])
+									if(dvbapi_ioctl(currentfd, CA_SET_PID, &ca_pid2) == -1)
 									{
-										if(dvbapi_ioctl(currentfd, CA_SET_PID, &ca_pid2) == -1)
-										{
-											cs_log_dbg(D_TRACE | D_DVBAPI,"CA_SET_PID ioctl error (errno=%d %s)", errno, strerror(errno));
-											remove_streampid_from_list(i, ca_pid2.pid, INDEX_DISABLE_ALL);
-										}
+										cs_log_dbg(D_TRACE | D_DVBAPI,"CA_SET_PID ioctl error (errno=%d %s)", errno, strerror(errno));
+										remove_streampid_from_list(i, ca_pid2.pid, INDEX_DISABLE_ALL);
 									}
 
 									uint32_t result = is_ca_used(i, 0); // check if in use by any pid
@@ -2708,7 +2713,7 @@ void dvbapi_stop_descrambling(int32_t demux_id, uint32_t msgid)
 	demux[demux_id].pidindex = -1;
 	demux[demux_id].curindex = -1;
 
-	if(!cfg.dvbapi_listenport && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX)
+	if(!dvbapi_listenport_active && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX)
 	{
 		unlink(ECMINFO_FILE);
 	}
@@ -4590,18 +4595,6 @@ static void dvbapi_prepare_descrambling(int32_t demux_id, uint32_t msgid)
 	// stream pid, so we have to check against that. Finally, if the PMT pid is
 	// not included in the CA PMT, we start the PAT filter instead.
 
-#ifdef WITH_EXTENDED_CW
-	uint8_t i;
-	for(i = 0; i < demux[demux_id].ECMpidcount; i++)
-	{
-		if(caid_is_powervu(demux[demux_id].ECMpids[i].CAID))
-		{
-			is_powervu = true;
-			break;
-		}
-	}
-#endif
-
 	if(demux[demux_id].pmtpid == 0)
 	{
 		dvbapi_start_pat_filter(demux_id);
@@ -5403,8 +5396,8 @@ int32_t dvbapi_net_init_listenfd(void)
 
 	memset(&servaddr, 0, sizeof(servaddr));
 	SIN_GET_FAMILY(servaddr) = DEFAULT_AF;
-	SIN_GET_ADDR(servaddr) = ADDR_ANY;
-	SIN_GET_PORT(servaddr) = htons((uint16_t)cfg.dvbapi_listenport);
+	SIN_GET_ADDR(servaddr) = cfg.dvbapi_srvip;
+	SIN_GET_PORT(servaddr) = htons((uint16_t)dvbapi_listenport_active);
 
 	if((listenfd = socket(DEFAULT_AF, SOCK_STREAM, 0)) < 0)
 	{
@@ -6533,7 +6526,7 @@ static void dvbapi_handlesockmsg(uint8_t *mbuf, uint16_t chunksize, uint16_t dat
 		case DVBAPI_AOT_CA_STOP:
 		{
 			cs_log_dbg(D_DVBAPI, "Received DVBAPI_AOT_CA_STOP object on socket %d:", connfd);
-			if(cfg.dvbapi_boxtype == BOXTYPE_IPBOX || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX || cfg.dvbapi_listenport)
+			if(cfg.dvbapi_boxtype == BOXTYPE_IPBOX || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX || dvbapi_listenport_active)
 			{
 				int32_t i;
 				int32_t demux_index = mbuf[7];
@@ -6811,7 +6804,7 @@ static void *dvbapi_main_local(void *cli)
 	if(cfg.dvbapi_boxtype != BOXTYPE_IPBOX_PMT &&
 		cfg.dvbapi_pmtmode != 2 && cfg.dvbapi_pmtmode != 5 && cfg.dvbapi_pmtmode != 6)
 	{
-		if(!cfg.dvbapi_listenport)
+		if(!dvbapi_listenport_active)
 		{
 			listenfd = dvbapi_init_listenfd();
 		}
@@ -6953,7 +6946,7 @@ static void *dvbapi_main_local(void *cli)
 					continue; // deny obvious invalid fd!
 				}
 
-				if(!cfg.dvbapi_listenport && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX
+				if(!dvbapi_listenport_active && cfg.dvbapi_boxtype != BOXTYPE_PC_NODMX
 					&& selected_api != STAPI && selected_api != COOLAPI && selected_api != GXAPI)
 				{
 					pfd2[pfdcount].fd = demux[i].demux_fd[g].fd;
@@ -7284,7 +7277,7 @@ static void *dvbapi_main_local(void *cli)
 							connfd = accept(listenfd, (struct sockaddr *)&servaddr, (socklen_t *)&clilen);
 							cs_log_dbg(D_DVBAPI, "new socket connection fd: %d", connfd);
 
-							if(cfg.dvbapi_listenport)
+							if(dvbapi_listenport_active)
 							{
 								// update webif data
 								client->ip = SIN_GET_ADDR(servaddr);
@@ -7344,9 +7337,9 @@ static void *dvbapi_main_local(void *cli)
 							close(connfd);
 
 							// last connection closed
-							if(!active_conn && (cfg.dvbapi_listenport || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX))
+							if(!active_conn && (dvbapi_listenport_active || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX))
 							{
-								if(cfg.dvbapi_listenport)
+								if(dvbapi_listenport_active)
 								{
 									// update webif data
 									client->ip = get_null_ip();
@@ -7742,15 +7735,6 @@ void delayer(ECM_REQUEST *er, uint32_t delay)
 	}
 }
 
-#ifdef WITH_EXTENDED_CW
-bool select_csa_alt(ECM_REQUEST *er)
-{
-	return ( caid_is_videoguard(er->caid)
-			&& er->ecm[4] != 0
-			&& (er->ecm[2] - er->ecm[4]) == 4 );
-}
-#endif
-
 void dvbapi_send_dcw(struct s_client *client, ECM_REQUEST *er)
 {
 	int32_t i, j, k, handled = 0;
@@ -8124,7 +8108,7 @@ void dvbapi_send_dcw(struct s_client *client, ECM_REQUEST *er)
 #endif
 #ifdef MODULE_STREAMRELAY
 		bool set_dvbapi_cw = true;
-		if(chk_ctab_ex(er->caid, &cfg.stream_relay_ctab) && cfg.stream_relay_enabled)
+		if((cfg.stream_relay_ctab.ctnum == 0 || chk_ctab_ex(er->caid, &cfg.stream_relay_ctab)) && cfg.stream_relay_enabled)
 		{
 			// streamserver set cw
 			set_dvbapi_cw = !stream_write_cw(er);
@@ -8353,9 +8337,9 @@ void dvbapi_send_dcw(struct s_client *client, ECM_REQUEST *er)
 		// reset idle-Time
 		client->last = time((time_t *)0); // ********* TO BE FIXED LATER ON ******
 
-		if((cfg.dvbapi_listenport || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX) || ca_soft_csa[i])
+		if((dvbapi_listenport_active || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX) || ca_soft_csa[i])
 		{
-			dvbapi_net_send(DVBAPI_ECM_INFO, demux[i].socket_fd, 0, i, 0, NULL, client, er, demux[i].client_proto_version);
+			dvbapi_net_send(DVBAPI_ECM_INFO, demux[i].socket_fd, er->msgid, i, 0, NULL, client, er, demux[i].client_proto_version);
 		}
 
 		if(cfg.dvbapi_ecminfo_file != 0 && cfg.dvbapi_boxtype != BOXTYPE_SAMYGO)
@@ -8868,7 +8852,7 @@ int32_t dvbapi_activate_section_filter(int32_t demux_id, int32_t num, int32_t fd
 				memcpy(sFP2.filter.filter, filter, 16);
 				memcpy(sFP2.filter.mask, mask, 16);
 
-				if(cfg.dvbapi_listenport || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
+				if(dvbapi_listenport_active || cfg.dvbapi_boxtype == BOXTYPE_PC_NODMX)
 				{
 					ret = dvbapi_net_send(DVBAPI_DMX_SET_FILTER,
 								demux[demux_id].socket_fd,
