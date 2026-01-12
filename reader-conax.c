@@ -5,7 +5,7 @@
 #include "csctapi/ifd_sci_ioctl.h"
 #include "csctapi/io_serial.h"
 #include "csctapi/icc_async.h"
-#include "ncam-time.h
+#include "ncam-time.h"
 
 struct conax_data {
     pthread_t reset_thread;
