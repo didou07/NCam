@@ -2781,6 +2781,13 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 			{ tpl_printf(vars, TPLAPPEND, "BOXKEY", "%02X", rdr->boxkey[i]); }
 	}
 
+#ifdef READER_CONAX
+	tpl_addVar(vars, TPLAPPEND, "CONAX_RESET_ENABLED", 
+				(rdr->conax_reset_enabled == 1) ? "checked" : "");
+	tpl_printf(vars, TPLAPPEND, "CONAX_RESET_INTERVAL", "%d", rdr->conax_reset_interval);
+	tpl_addVar(vars, TPLAPPEND, "CONAX_CARDINFO_ENABLED", 
+				(rdr->conax_cardinfo_enabled == 1) ? "checked" : "");
+#endif
 #ifdef READER_NAGRA_MERLIN
 	// mod1 (CAK7)
 	len = rdr->mod1_length;

@@ -1600,6 +1600,11 @@ static const struct config_list reader_opts[] =
 	DEF_OPT_FUNC("caid"                           , OFS(ctab),                            reader_caid_fn),
 	DEF_OPT_FUNC("atr"                            , 0,                                    atr_fn),
 	DEF_OPT_FUNC("boxid"                          , 0,                                    boxid_fn),
+#ifdef READER_CONAX
+	DEF_OPT_INT8("conax_reset_enabled"            , OFS(conax_reset_enabled),             0),
+	DEF_OPT_INT32("conax_reset_interval"          , OFS(conax_reset_interval),            60),
+	DEF_OPT_INT8("conax_cardinfo_enabled"         , OFS(conax_cardinfo_enabled),          1),
+#endif
 #if defined(READER_STREAMGUARD) || defined(READER_TONGFANG) || defined(READER_JET)
 	DEF_OPT_INT32("cas_version"                   , OFS(cas_version),                     0),
 	DEF_OPT_FUNC("cas_version_fixed"              , 0,                                    cas_version_fixed_fn),

@@ -1705,6 +1705,11 @@ struct s_reader
 	int32_t         l_port;
 	CAIDTAB         ctab;
 	uint32_t        boxid;
+#ifdef READER_CONAX
+	int8_t          conax_reset_enabled;
+	int32_t         conax_reset_interval;
+	int8_t          conax_cardinfo_enabled;
+#endif
 #ifdef READER_TONGFANG
 	uint32_t	tongfang_version;
 	uint8_t         tongfang3_commkey[8];
