@@ -2986,6 +2986,11 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 		tpl_printf(vars, TPLADD, "COOLDOWNDELAY", "%d", rdr->cooldown[0]);
 		tpl_printf(vars, TPLADD, "COOLDOWNTIME", "%d", rdr->cooldown[1]);
 	}
+	// Max parallel services
+	tpl_printf(vars, TPLADD, "MAXPARALLEL", "%d", rdr->maxparallel);
+	// Parallelfactor: format as float with dot (comma would break URL parameters)
+	tpl_printf(vars, TPLADD, "PARALLELFACTOR", "%.1f", rdr->parallelfactor >= 0 ? rdr->parallelfactor : 2.0);
+	tpl_printf(vars, TPLADD, "PARALLELTIMEOUT", "%d", rdr->paralleltimeout);
 	// Frequencies
 	tpl_printf(vars, TPLADD, "MHZ", "%d", rdr->mhz);
 	tpl_printf(vars, TPLADD, "CARDMHZ", "%d", rdr->cardmhz);
@@ -5105,7 +5110,7 @@ static char *send_ncam_user_config(struct templatevars *vars, struct uriparams *
 
 #define ENTITLEMENT_PAGE_SIZE 500
 
-#ifdef MODULE_CCCSHARE
+#ifdef MODULE_CCCAM
 static void print_cards(struct templatevars *vars, struct uriparams *params, struct cc_card **cardarray, int32_t cardsize,
 						int8_t show_global_list, struct s_reader *rdr, int32_t offset, int32_t apicall)
 {
@@ -5319,8 +5324,12 @@ static char *send_ncam_entitlement(struct templatevars *vars, struct uriparams *
 	if(!apicall) { setActiveMenu(vars, MNU_READERS); }
 	char *reader_ = getParam(params, "label");
 #ifdef MODULE_CCCAM
+#ifdef MODULE_CCCSHARE
 	char *sharelist_ = getParam(params, "globallist");
 	int32_t show_global_list = sharelist_ && sharelist_[0] == '1';
+#else
+	int32_t show_global_list = 0;
+#endif
 
 	struct s_reader *rdr = get_reader_by_label(getParam(params, "label"));
 	if(show_global_list || cs_strlen(reader_) || (rdr && rdr->typ == R_CCCAM))
@@ -5342,9 +5351,9 @@ static char *send_ncam_entitlement(struct templatevars *vars, struct uriparams *
 				tpl_printf(vars, TPLADD, "APIHOSTPORT", "%d", rdr->r_port);
 			}
 
-#ifdef MODULE_CCCSHARE
 			int32_t offset = atoi(getParam(params, "offset")); //should be 0 if parameter is missed on very first call
 			int32_t cardsize;
+#ifdef MODULE_CCCSHARE
 			if(show_global_list)
 			{
 				int32_t i;
@@ -5362,6 +5371,7 @@ static char *send_ncam_entitlement(struct templatevars *vars, struct uriparams *
 				NULLFREE(cardarray);
 			}
 			else
+#endif
 			{
 				struct s_client *rc = rdr->client;
 				struct cc_data *rcc = (rc) ? rc->cc : NULL;
@@ -5372,8 +5382,6 @@ static char *send_ncam_entitlement(struct templatevars *vars, struct uriparams *
 					NULLFREE(cardarray);
 				}
 			}
-#endif
-
 		}
 		else
 		{
@@ -7000,11 +7008,10 @@ static char *send_ncam_services_edit(struct templatevars * vars, struct uriparam
 		for(sidtab = cfg.sidtab; sidtab != NULL && strcmp(label, sidtab->label) != 0; sidtab = sidtab->next) { ; }
 	}
 
-	tpl_addVar(vars, TPLADD, "LABEL", xml_encode(vars, sidtab->label));
-	tpl_addVar(vars, TPLADD, "LABELENC", urlencode(vars, sidtab->label));
-
 	if(sidtab)
 	{
+		tpl_addVar(vars, TPLADD, "LABEL", xml_encode(vars, sidtab->label));
+		tpl_addVar(vars, TPLADD, "LABELENC", urlencode(vars, sidtab->label));
 #ifdef CS_CACHEEX_AIO
 		tpl_addVar(vars, TPLADD, "NWCHECKED", (sidtab->no_wait_time == 1) ? "checked" : "" );
 		tpl_addVar(vars, TPLADD, "LGOECHECKED", (sidtab->lg_only_exception == 1) ? "checked" : "" );
@@ -7277,7 +7284,7 @@ static char *send_ncam_script(struct templatevars * vars, struct uriparams * par
 			{
 				if(s.st_mode & S_IXUSR)
 				{
-					int32_t rc;
+					int32_t rc = -1;
 					FILE *fp;
 					char buf[256];
 
@@ -7289,13 +7296,15 @@ static char *send_ncam_script(struct templatevars * vars, struct uriparams * par
 
 					fp = popen(system_str,"r");
 
-					while (fgets(buf, sizeof(buf), fp) != NULL)
+					if (fp)
 					{
-						tpl_addVar(vars, TPLAPPEND, "SCRIPTRESULTOUT", buf);
+						while (fgets(buf, sizeof(buf), fp) != NULL)
+						{
+							tpl_addVar(vars, TPLAPPEND, "SCRIPTRESULTOUT", buf);
+						}
+
+						rc = pclose(fp)/256;
 					}
-
-					rc = pclose(fp)/256;
-
 					tpl_printf(vars, TPLAPPEND, "CODE", "returncode: %d", rc);
 					tpl_printf(vars, TPLADD, "SCRIPTNAME", "scriptname: %s", scriptname);
 				}
@@ -7343,8 +7352,8 @@ static char *send_ncam_scanusb(struct templatevars * vars)
 			tpl_addVar(vars, TPLAPPEND, "USBBIT", tpl_getTpl(vars, "SCANUSBBIT"));
 		}
 		while(fgets(path, sizeof(path) - 1, fp) != NULL);
+		pclose(fp);
 	}
-	pclose(fp);
 #else
 	tpl_addMsg(vars, "Function not supported in CYGWIN environment");
 #endif
@@ -7359,7 +7368,10 @@ static void webif_process_logfile(struct templatevars * vars, struct uriparams *
 		if(cs_strlen(targetfile) > 0)
 		{
 			FILE *file = fopen(targetfile, "w");
-			fclose(file);
+			if (file != NULL)
+			{
+				fclose(file);
+			}
 		}
 	}
 #ifdef WITH_DEBUG
@@ -7415,7 +7427,10 @@ static void webif_process_userfile(struct templatevars * vars, struct uriparams 
 		if(cs_strlen(targetfile) > 0)
 		{
 			FILE *file = fopen(targetfile, "w");
-			fclose(file);
+			if (file)
+			{
+				fclose(file);
+			}
 		}
 	}
 	if(!cfg.disableuserfile)
@@ -8131,13 +8146,16 @@ static char *send_ncam_EMM(struct templatevars * vars, struct uriparams * params
 					do {
 						snprintf(orgfile, sizeof(orgfile), "%s.%d", targetfile, f);
 						f++;
-					} while(access(orgfile, 0|F_OK) != -1);
+					} while(access(orgfile, F_OK) != -1);
 
 					if(rename(targetfile, orgfile) == 0)
 					{
 						FILE *fs = fopen(targetfile, "w");
-						fprintf(fs, "%s", tpl_getVar(vars, "EMM_TMP"));
-						fclose(fs);
+						if (fs)
+						{
+							fprintf(fs, "%s", tpl_getVar(vars, "EMM_TMP"));
+							fclose(fs);
+						}
 						tpl_printf(vars, TPLAPPEND, emm_txt, "<br><b>New reduced File created!</b> Size of Original File is higher as %d kB, saved to %s", emm_max_size[i], orgfile);
 					}
 				}

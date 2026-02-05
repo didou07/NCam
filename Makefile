@@ -45,6 +45,7 @@ CONF_DIR = /usr/local/etc
 LIB_PTHREAD = -lpthread
 LIB_DL := -ldl
 
+
 LIB_RT :=
 ifeq ($(uname_S),Linux)
 	ifndef ANDROID_NDK
