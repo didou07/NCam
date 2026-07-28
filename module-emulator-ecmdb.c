@@ -159,7 +159,8 @@ static int parse_ecm_line(const char *line, uint8_t *ecm, uint8_t *cw,
     if (*ecm_len > ECMDB_MAX_ECM_LEN)
         return 0;
     
-    for (size_t i = 0; i < *ecm_len; i++)
+    size_t i;
+    for (i = 0; i < *ecm_len; i++)
     {
         unsigned int byte;
         if (sscanf(line + i * 2, "%2x", &byte) != 1)
@@ -173,7 +174,7 @@ static int parse_ecm_line(const char *line, uint8_t *ecm, uint8_t *cw,
     if (cs_strlen(cw_start) < ECMDB_CW_LEN * 2)
         return 0;
     
-    for (size_t i = 0; i < ECMDB_CW_LEN; i++)
+    for (i = 0; i < ECMDB_CW_LEN; i++)
     {
         unsigned int byte;
         if (sscanf(cw_start + i * 2, "%2x", &byte) != 1)
@@ -187,7 +188,8 @@ static int parse_ecm_line(const char *line, uint8_t *ecm, uint8_t *cw,
 // File Cache (DIRECT mode)
 static ecmdb_cache_t* cache_find(uint32_t channel_idx)
 {
-    for (int i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
+    int i;
+    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
     {
         if (ecmdb->file_cache[i].fp && 
             ecmdb->file_cache[i].channel_idx == channel_idx)
@@ -203,8 +205,9 @@ static ecmdb_cache_t* cache_get_lru(void)
 {
     ecmdb_cache_t *lru = NULL;
     time_t oldest = time(NULL);
+    int i;
     
-    for (int i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
+    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
     {
         if (!ecmdb->file_cache[i].fp)
             return &ecmdb->file_cache[i];
@@ -251,7 +254,8 @@ static FILE* cache_open(uint32_t channel_idx)
 
 static void cache_release(uint32_t channel_idx)
 {
-    for (int i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
+    int i;
+    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
     {
         if (ecmdb->file_cache[i].fp && 
             ecmdb->file_cache[i].channel_idx == channel_idx)
@@ -264,7 +268,8 @@ static void cache_release(uint32_t channel_idx)
 
 static void cache_close_all(void)
 {
-    for (int i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
+    int i;
+    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
     {
         if (ecmdb->file_cache[i].fp)
         {
@@ -342,7 +347,8 @@ static int load_channel_ram(ecmdb_channel_t *ch, const char *filepath,
         
         // Check duplicates
         int dup = 0;
-        for (uint32_t i = 0; i < seen_count; i++)
+        uint32_t i;
+        for (i = 0; i < seen_count; i++)
         {
             if (seen[i] == hash)
             {
@@ -683,8 +689,9 @@ int8_t ecmdb_init(struct s_reader *rdr)
         
         size_t total_memory = 0;
         uint32_t total_entries = 0;
+        uint32_t i;
         
-        for (uint32_t i = 0; i < ecmdb->channel_count; i++)
+        for (i = 0; i < ecmdb->channel_count; i++)
         {
             ecmdb_channel_t *ch = &ecmdb->channels[i];
             total_memory += ch->pool_used;
@@ -764,7 +771,8 @@ void ecmdb_cleanup(void)
     
     if (ecmdb->channels)
     {
-        for (uint32_t i = 0; i < ecmdb->channel_count; i++)
+        uint32_t i, j;
+        for (i = 0; i < ecmdb->channel_count; i++)
         {
             ecmdb_channel_t *ch = &ecmdb->channels[i];
             
@@ -772,7 +780,7 @@ void ecmdb_cleanup(void)
             
             if (ch->hash_table)
             {
-                for (uint32_t j = 0; j < ECMDB_HASH_SIZE; j++)
+                for (j = 0; j < ECMDB_HASH_SIZE; j++)
                 {
                     ecmdb_entry_t *entry = ch->hash_table[j];
                     while (entry)

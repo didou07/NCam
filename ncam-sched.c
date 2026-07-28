@@ -149,7 +149,8 @@ static int http_extract_quoted(const char *hdr, const char *param, char *out, si
  */
 static void digest_md5_hex(const unsigned char *md5, char *hex)
 {
-    for (int i = 0; i < MD5_DIGEST_LENGTH; i++)           // Process each hash byte
+    int i;
+    for (i = 0; i < MD5_DIGEST_LENGTH; i++)               // Process each hash byte
         snprintf(hex + (i * 2), 3, "%02x", md5[i]);       // Convert byte to hex
 }
 
@@ -469,7 +470,8 @@ static void *sched_job_run(void *arg)
     cs_writeunlock(__func__, &g_sched.lock);
     
     // Step 2: Execute each job step in sequence
-    for (int i = 0; i < job->step_count; i++) {
+    int i;
+    for (i = 0; i < job->step_count; i++) {
         switch (job->steps[i].type) {
             case STEP_API:
                 // Execute API call, log failure but continue execution
@@ -545,7 +547,8 @@ static void *sched_loop(void *UNUSED(arg))
         
         // Thread-safe job processing
         cs_writelock(__func__, &g_sched.lock);
-        for (int i = 0; i < g_sched.job_count; i++) {
+        int i;
+        for (i = 0; i < g_sched.job_count; i++) {
             job_t *job = &g_sched.jobs[i];
             
             // Skip conditions
@@ -703,7 +706,8 @@ static int sched_load_cfg(FILE *fp)
     }
 
     // Log loaded configuration for debugging
-    for (int i = 0; i < g_sched.job_count; i++) {
+    int i;
+    for (i = 0; i < g_sched.job_count; i++) {
         job_t *j = &g_sched.jobs[i];
         cs_log("Loaded job '%s': steps=%d loop=%d interval=%d daily=%d weekly=%d datetime=%d", 
                j->name, j->step_count, j->loop, j->interval_sec, 
@@ -778,10 +782,11 @@ void ncam_sched_shutdown(void)
     pthread_join(g_sched.thread, NULL);                  // Wait for main thread
 
     // Step 2: Wait for worker threads to complete (max 10 seconds)
-    for (int w = 0; w < 100; w++) {
+    int w, i;
+    for (w = 0; w < 100; w++) {
         int running = 0;
         cs_writelock(__func__, &g_sched.lock);
-        for (int i = 0; i < g_sched.job_count; i++)
+        for (i = 0; i < g_sched.job_count; i++)
             if (g_sched.jobs[i].is_running) running++;   // Count active workers
         cs_writeunlock(__func__, &g_sched.lock);
 
@@ -790,7 +795,7 @@ void ncam_sched_shutdown(void)
     }
 
     // Step 3: Free allocated resources
-    for (int i = 0; i < g_sched.job_count; i++)
+    for (i = 0; i < g_sched.job_count; i++)
         if (g_sched.jobs[i].steps)
             NULLFREE(g_sched.jobs[i].steps);             // Free step arrays
 

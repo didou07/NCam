@@ -2050,6 +2050,9 @@ struct s_reader
 #endif
 #ifdef READER_CONAX
 	uint8_t         cnxlastecm;                     // == 0 - last ecm has not been paired ecm, > 0 last ecm has been paired ecm
+	int8_t          conax_reset_enabled;
+	int32_t         conax_reset_interval;
+	int8_t          conax_cardinfo_enabled;
 #endif
 	LLIST           *emmstat;                       //emm stats
 	CS_MUTEX_LOCK   emmstat_lock;

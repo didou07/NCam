@@ -2356,15 +2356,17 @@ static void write_ecm_cw_log(struct s_reader *reader, ECM_REQUEST *er, uint8_t *
     flockfile(file);
 
     // Write ECM bytes in specified range
-    for (uint8_t i = range_start; i < range_end; i++)
+    uint8_t i;
+    for (i = range_start; i < range_end; i++)
         fprintf(file, "%02X", er->ecm[i]);
 
     // Write separator
     fprintf(file, " #CW ");
 
     // Write complete CW (16 bytes)
-    for (int i = 0; i < CW_LENGTH; i++)
-        fprintf(file, "%02X", cw[i]);
+    int j;
+    for (j = 0; j < CW_LENGTH; j++)
+        fprintf(file, "%02X", cw[j]);
 
     fprintf(file, "\n");
     fflush(file);

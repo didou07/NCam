@@ -2,6 +2,98 @@
 #ifdef READER_CONAX
 #include "cscrypt/bn.h"
 #include "reader-common.h"
+#include "csctapi/ifd_sci_ioctl.h"
+#include "csctapi/io_serial.h"
+#include "csctapi/icc_async.h"
+#include "ncam-time.h"
+
+struct conax_data {
+    pthread_t reset_thread;
+    volatile int8_t thread_running;
+    time_t last_reset_time;
+};
+
+static void *auto_reset_thread(void *arg)
+{
+    struct s_reader *reader = (struct s_reader *)arg;
+    struct conax_data *csystem_data = (struct conax_data *)reader->csystem_data;
+
+    set_thread_name(__func__);
+
+    while(csystem_data->thread_running && reader->enable)
+    {
+        if(!reader->conax_reset_enabled)
+        {
+            sleep(1);
+            continue;
+        }
+
+        int i;
+        for(i = 0; i < reader->conax_reset_interval && csystem_data->thread_running; i++)
+        {
+            sleep(1);
+        }
+
+        if(!csystem_data->thread_running || !reader->enable || !reader->conax_reset_enabled)
+            continue;
+
+        #ifdef WITH_CARDREADER
+        const struct s_cardreader *crdr_ops = reader->crdr;
+
+        if(reader->typ == R_INTERNAL)
+        {
+            #ifdef CARDREADER_INTERNAL_SCI
+            if(reader->handle > 0)
+            {
+                int32_t card_present = 0;
+                if(ioctl(reader->handle, IOCTL_GET_IS_CARD_PRESENT, &card_present) >= 0 && card_present)
+                {
+                    if(crdr_ops && crdr_ops->flush)
+                        IO_Serial_Flush(reader);
+
+                    if(ioctl(reader->handle, IOCTL_SET_RESET, 1) >= 0)
+                    {
+                        cs_sleepms(50);
+
+                        uint8_t atr_buf[ATR_MAX_SIZE];
+
+                        if(IO_Serial_Read(reader, 0, 500, reader->card_atr_length, atr_buf) == 0)
+                        {
+                            if(atr_buf[0] == 0x3B || atr_buf[0] == 0x3F)
+                            {
+                                ioctl(reader->handle, IOCTL_SET_ATR_READY, 1);
+                                memcpy(reader->card_atr, atr_buf, reader->card_atr_length);
+                                csystem_data->last_reset_time = time(NULL);
+                            }
+                        }
+                    }
+                }
+            }
+            #endif
+        }
+        else if(crdr_ops && crdr_ops->activate)
+        {
+            ATR atr;
+
+            if(crdr_ops->activate(reader, &atr) == OK)
+            {
+                uint8_t atr_buf[ATR_MAX_SIZE];
+                uint32_t atr_size = 0;
+
+                if(ATR_GetRaw(&atr, atr_buf, &atr_size) == ATR_OK && atr_size > 0)
+                {
+                    memcpy(reader->card_atr, atr_buf, atr_size);
+                    reader->card_atr_length = atr_size;
+                    csystem_data->last_reset_time = time(NULL);
+                }
+            }
+        }
+        #endif
+    }
+
+    csystem_data->thread_running = 0;
+    return NULL;
+}
 
 static int32_t RSA_CNX(struct s_reader *reader, uint8_t *msg, uint8_t *mod, uint8_t *exp, uint32_t cta_lr, uint32_t modbytes, uint32_t expbytes)
 {
@@ -228,6 +320,33 @@ static int32_t conax_card_init(struct s_reader *reader, ATR *newatr)
 		rdr_log_sensitive(reader, "Provider: %d SharedAddress: {%08X}", j + 1, b2i(4, reader->sa[j]));
 	}
 
+	if(!cs_malloc(&reader->csystem_data, sizeof(struct conax_data)))
+		{ return ERROR; }
+
+    struct conax_data *csystem_data = (struct conax_data *)reader->csystem_data;
+    memset(csystem_data, 0, sizeof(struct conax_data));
+
+    csystem_data->last_reset_time = time(NULL);
+    csystem_data->thread_running = 1;
+
+    if(reader->conax_reset_enabled)
+    {
+        if(pthread_create(&csystem_data->reset_thread, NULL, auto_reset_thread, reader) != 0)
+        {
+            csystem_data->thread_running = 0;
+            NULLFREE(reader->csystem_data);
+            return ERROR;
+        }
+
+        pthread_detach(csystem_data->reset_thread);
+        rdr_log(reader, "Auto-reset: %d seconds",
+            reader->conax_reset_interval);
+    }
+    else
+    {
+        rdr_log(reader, "Auto reset disabled");
+    }
+
 	return OK;
 }
 
@@ -360,8 +479,15 @@ static int32_t conax_do_ecm(struct s_reader *reader, const ECM_REQUEST *er, stru
 	/* answer 9011 - conax smart card need reset */
 	if(2 <= cta_lr && 0x90 == cta_res[cta_lr - 2] && 0x11 == cta_res[cta_lr - 1])
 	{
-		rdr_log(reader, "conax card hangs - reset is required");
-		reader->card_status = UNKNOWN;
+		if(reader->conax_reset_enabled)
+		{
+			rdr_log(reader, "Card response 9011 skipped");
+		}
+		else
+		{
+			rdr_log(reader, "conax card hangs - reset is required");
+			reader->card_status = UNKNOWN;
+		}
 	}
 
 	if(rc == 3)
@@ -491,6 +617,11 @@ static int32_t conax_do_emm(struct s_reader *reader, EMM_PACKET *ep)
 
 static int32_t conax_card_info(struct s_reader *reader)
 {
+	if(!reader->conax_cardinfo_enabled)
+	{
+		rdr_log(reader, "Card info disabled");
+		return OK;
+	}
 	def_resp;
 	int32_t type, i, j, k = 0, n = 0, l;
 	uint16_t provid = 0;
