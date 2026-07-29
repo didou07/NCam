@@ -426,6 +426,8 @@ SRC-$(CONFIG_WITH_EMU) += module-emulator-powervu.c
 SRC-$(CONFIG_WITH_EMU) += module-emulator-viaccess.c
 SRC-$(CONFIG_WITH_EMU) += module-emulator-tvcas.c
 SRC-$(CONFIG_WITH_EMU) += module-emulator-ecmdb.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-ecmdb-ram.c
+SRC-$(CONFIG_WITH_EMU) += module-emulator-ecmdb-direct.c
 ifeq "$(CONFIG_WITH_EMU)" "y"
 ifeq "$(CONFIG_WITH_SOFTCAM)" "y"
 UNAME := $(shell uname -s)
@@ -484,6 +486,8 @@ SRC-$(CONFIG_WEBIF) += module-webif-lib.c
 SRC-$(CONFIG_WEBIF) += module-webif-tpl.c
 SRC-$(CONFIG_WEBIF) += module-webif.c
 SRC-$(CONFIG_WEBIF) += ncam-sched.c
+SRC-$(CONFIG_WEBIF) += ncam-sched-cfg.c
+SRC-$(CONFIG_WEBIF) += ncam-sched-http.c
 SRC-$(CONFIG_WEBIF) += webif/pages.c
 SRC-$(CONFIG_WITH_CARDREADER) += reader-common.c
 SRC-$(CONFIG_READER_BULCRYPT) += reader-bulcrypt.c

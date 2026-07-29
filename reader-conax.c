@@ -10,6 +10,7 @@
 struct conax_data {
     pthread_t reset_thread;
     volatile int8_t thread_running;
+    int8_t thread_started;         // Set once reset_thread has actually been created
     time_t last_reset_time;
 };
 
@@ -338,7 +339,10 @@ static int32_t conax_card_init(struct s_reader *reader, ATR *newatr)
             return ERROR;
         }
 
-        pthread_detach(csystem_data->reset_thread);
+        // Kept joinable (not detached) so conax_card_done() can wait for a
+        // deterministic shutdown instead of relying only on reader->enable
+        // being noticed on the thread's next poll (up to ~1s later).
+        csystem_data->thread_started = 1;
         rdr_log(reader, "Auto-reset: %d seconds",
             reader->conax_reset_interval);
     }
@@ -704,6 +708,30 @@ static int32_t conax_card_info(struct s_reader *reader)
 	return OK;
 }
 
+/*
+ * Conax Reader Shutdown Hook
+ * Purpose: Deterministically stops the auto-reset thread (if running) and
+ * frees the reader's csystem_data, instead of leaving thread teardown to
+ * happen implicitly whenever the detached thread next wakes up and notices
+ * reader->enable went to 0 (previously up to ~1s of delay, and the memory
+ * was never explicitly freed here at all).
+ * Called by the generic struct s_cardsystem.card_done hook, which NCam
+ * already invokes from cardreader_close()/reader shutdown paths.
+ */
+static void conax_card_done(struct s_reader *reader)
+{
+    struct conax_data *csystem_data = (struct conax_data *)reader->csystem_data;
+    if(!csystem_data) return;
+
+    if(csystem_data->thread_started)
+    {
+        csystem_data->thread_running = 0;    // Signal thread to exit
+        pthread_join(csystem_data->reset_thread, NULL);
+    }
+
+    NULLFREE(reader->csystem_data);
+}
+
 const struct s_cardsystem reader_conax =
 {
 	.desc           = "conax",
@@ -712,6 +740,7 @@ const struct s_cardsystem reader_conax =
 	.do_ecm         = conax_do_ecm,
 	.card_info      = conax_card_info,
 	.card_init      = conax_card_init,
+	.card_done      = conax_card_done,
 	.get_emm_type   = conax_get_emm_type,
 	.get_emm_filter = conax_get_emm_filter,
 };

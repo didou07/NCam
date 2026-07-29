@@ -25,6 +25,15 @@ typedef struct ecmdb_entry {
     struct ecmdb_entry *next;
 } ecmdb_entry_t;
 
+// DIRECT mode index entry: points at a line's on-disk position instead of
+// keeping its data in memory, so a lookup can binary-search + seek
+// straight to it instead of scanning the whole file line by line.
+typedef struct {
+    uint32_t hash;             // xxHash32 of the ECM bytes on this line
+    long     offset;           // ftell() position of the start of this line
+    uint16_t len;              // ECM length in bytes, for a quick pre-check
+} ecmdb_index_entry_t;
+
 // Channel metadata
 typedef struct {
     char *filepath;
@@ -39,6 +48,10 @@ typedef struct {
     uint8_t *data_pool;
     size_t pool_used;
     size_t pool_size;
+
+    // DIRECT mode
+    ecmdb_index_entry_t *index;    // Sorted by hash (see module-emulator-ecmdb-direct.c)
+    uint32_t index_count;
 } ecmdb_channel_t;
 
 // File cache entry (DIRECT mode)

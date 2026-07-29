@@ -6,7 +6,18 @@
 
 #include "ncam-string.h"
 #include "module-emulator-nemu.h"
-#include "module-emulator-ecmdb.h"
+#include "module-emulator-ecmdb-priv.h"
+
+/*
+ * ECMDB Core: hashing, line parsing, channel directory scan, and the
+ * public API (ecmdb_init/ecmdb_ecm/ecmdb_cleanup).
+ *
+ * Storage-mode-specific code lives in its own file and is reached only
+ * through the ecmdb_backend_t dispatch table (see
+ * module-emulator-ecmdb-priv.h):
+ *   module-emulator-ecmdb-ram.c     - ECMDB_MODE_RAM
+ *   module-emulator-ecmdb-direct.c  - ECMDB_MODE_DIRECT
+ */
 
 static ecmdb_t *ecmdb = NULL;
 
@@ -29,7 +40,7 @@ static inline uint32_t xxh_read32(const void *ptr)
     return val;
 }
 
-static uint32_t xxhash32(const uint8_t *data, size_t len, uint32_t seed)
+uint32_t xxhash32(const uint8_t *data, size_t len, uint32_t seed)
 {
     const uint8_t *p = data;
     const uint8_t *end = data + len;
@@ -106,10 +117,34 @@ static int compare_keys(const void *a, const void *b)
     return (ka < kb) ? -1 : (ka > kb) ? 1 : 0;
 }
 
-static void secure_zero(void *ptr, size_t len)
+void secure_zero(void *ptr, size_t len)
 {
     volatile uint8_t *p = ptr;
     while (len--) *p++ = 0;
+}
+
+// Fast hex nibble decode - avoids per-byte sscanf() overhead in the hot
+// parsing path (called for every line loaded and, in DIRECT mode, for
+// every seek-and-verify on an ECM lookup).
+static inline int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static inline int hex_decode(const char *src, uint8_t *dst, size_t nbytes)
+{
+    size_t i;
+    for (i = 0; i < nbytes; i++)
+    {
+        int hi = hex_nibble(src[i * 2]);
+        int lo = hex_nibble(src[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return 0;
+        dst[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return 1;
 }
 
 // Filename Parser
@@ -141,8 +176,8 @@ static int parse_channel_filename(const char *filename, uint16_t *caid,
 }
 
 // ECM Line Parser - Modified to accept any valid length
-static int parse_ecm_line(const char *line, uint8_t *ecm, uint8_t *cw, 
-                          uint16_t *ecm_len)
+int parse_ecm_line(const char *line, uint8_t *ecm, uint8_t *cw, 
+                    uint16_t *ecm_len)
 {
     while (*line == ' ' || *line == '\t') line++;
     
@@ -159,14 +194,8 @@ static int parse_ecm_line(const char *line, uint8_t *ecm, uint8_t *cw,
     if (*ecm_len > ECMDB_MAX_ECM_LEN)
         return 0;
     
-    size_t i;
-    for (i = 0; i < *ecm_len; i++)
-    {
-        unsigned int byte;
-        if (sscanf(line + i * 2, "%2x", &byte) != 1)
-            return 0;
-        ecm[i] = (uint8_t)byte;
-    }
+    if (!hex_decode(line, ecm, *ecm_len))
+        return 0;
     
     const char *cw_start = cw_marker + 5;
     while (*cw_start == ' ' || *cw_start == '\t') cw_start++;
@@ -174,345 +203,16 @@ static int parse_ecm_line(const char *line, uint8_t *ecm, uint8_t *cw,
     if (cs_strlen(cw_start) < ECMDB_CW_LEN * 2)
         return 0;
     
-    for (i = 0; i < ECMDB_CW_LEN; i++)
-    {
-        unsigned int byte;
-        if (sscanf(cw_start + i * 2, "%2x", &byte) != 1)
-            return 0;
-        cw[i] = (uint8_t)byte;
-    }
+    if (!hex_decode(cw_start, cw, ECMDB_CW_LEN))
+        return 0;
     
     return 1;
 }
 
-// File Cache (DIRECT mode)
-static ecmdb_cache_t* cache_find(uint32_t channel_idx)
+// Selects the storage backend for the database's current mode.
+static const ecmdb_backend_t *ecmdb_backend(void)
 {
-    int i;
-    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
-    {
-        if (ecmdb->file_cache[i].fp && 
-            ecmdb->file_cache[i].channel_idx == channel_idx)
-        {
-            ecmdb->file_cache[i].last_access = time(NULL);
-            return &ecmdb->file_cache[i];
-        }
-    }
-    return NULL;
-}
-
-static ecmdb_cache_t* cache_get_lru(void)
-{
-    ecmdb_cache_t *lru = NULL;
-    time_t oldest = time(NULL);
-    int i;
-    
-    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
-    {
-        if (!ecmdb->file_cache[i].fp)
-            return &ecmdb->file_cache[i];
-            
-        if (!ecmdb->file_cache[i].in_use && 
-            ecmdb->file_cache[i].last_access < oldest)
-        {
-            oldest = ecmdb->file_cache[i].last_access;
-            lru = &ecmdb->file_cache[i];
-        }
-    }
-    return lru;
-}
-
-static FILE* cache_open(uint32_t channel_idx)
-{
-    ecmdb_cache_t *entry = cache_find(channel_idx);
-    if (entry)
-    {
-        entry->in_use = 1;
-        return entry->fp;
-    }
-    
-    ecmdb_channel_t *ch = &ecmdb->channels[channel_idx];
-    FILE *fp = fopen(ch->filepath, "r");
-    if (!fp) return NULL;
-    
-    entry = cache_get_lru();
-    if (!entry)
-    {
-        fclose(fp);
-        return NULL;
-    }
-    
-    if (entry->fp) fclose(entry->fp);
-    
-    entry->fp = fp;
-    entry->channel_idx = channel_idx;
-    entry->last_access = time(NULL);
-    entry->in_use = 1;
-    
-    return fp;
-}
-
-static void cache_release(uint32_t channel_idx)
-{
-    int i;
-    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
-    {
-        if (ecmdb->file_cache[i].fp && 
-            ecmdb->file_cache[i].channel_idx == channel_idx)
-        {
-            ecmdb->file_cache[i].in_use = 0;
-            return;
-        }
-    }
-}
-
-static void cache_close_all(void)
-{
-    int i;
-    for (i = 0; i < ECMDB_FILE_CACHE_SIZE; i++)
-    {
-        if (ecmdb->file_cache[i].fp)
-        {
-            fclose(ecmdb->file_cache[i].fp);
-            ecmdb->file_cache[i].fp = NULL;
-        }
-    }
-}
-
-// RAM Mode - Channel Loading with offset-based storage
-static int load_channel_ram(ecmdb_channel_t *ch, const char *filepath,
-                            uint8_t ecm_start, uint8_t ecm_end)
-{
-    FILE *fp = fopen(filepath, "r");
-    if (!fp) return 0;
-    
-    uint16_t expected_len = ecm_end - ecm_start;
-    
-    ch->hash_table = calloc(ECMDB_HASH_SIZE, sizeof(ecmdb_entry_t*));
-    if (!ch->hash_table)
-    {
-        fclose(fp);
-        return 0;
-    }
-    
-    size_t pool_size = 2 * 1024 * 1024;
-    ch->data_pool = malloc(pool_size);
-    if (!ch->data_pool)
-    {
-        free(ch->hash_table);
-        fclose(fp);
-        return 0;
-    }
-    
-    ch->pool_size = pool_size;
-    ch->pool_used = 0;
-    
-    char line[1024];
-    uint8_t ecm_buf[ECMDB_MAX_ECM_LEN], cw_buf[ECMDB_CW_LEN];
-    uint16_t ecm_len;
-    
-    uint32_t *seen = malloc(50000 * sizeof(uint32_t));
-    uint32_t seen_count = 0;
-    uint32_t skipped_count = 0;
-    uint32_t length_mismatch = 0;
-    
-    if (!seen)
-    {
-        free(ch->data_pool);
-        free(ch->hash_table);
-        fclose(fp);
-        return 0;
-    }
-    
-    while (fgets(line, sizeof(line), fp))
-    {
-        if (line[0] == '\n' || line[0] == '\r' || line[0] == '#')
-            continue;
-        
-        // Parse line (accepts any valid length)
-        if (!parse_ecm_line(line, ecm_buf, cw_buf, &ecm_len))
-        {
-            skipped_count++;
-            continue;
-        }
-        
-        // Check if length matches filename specification
-        if (ecm_len != expected_len)
-        {
-            length_mismatch++;
-            continue;
-        }
-        
-        uint32_t hash = xxhash32(ecm_buf, ecm_len, 0);
-        
-        // Check duplicates
-        int dup = 0;
-        uint32_t i;
-        for (i = 0; i < seen_count; i++)
-        {
-            if (seen[i] == hash)
-            {
-                dup = 1;
-                break;
-            }
-        }
-        if (dup) continue;
-        
-        // Expand pool if needed
-        if (ch->pool_used + ecm_len > ch->pool_size)
-        {
-            size_t new_size = ch->pool_size * 2;
-            if (new_size > 100 * 1024 * 1024) break;
-            
-            uint8_t *new_pool = realloc(ch->data_pool, new_size);
-            if (!new_pool) break;
-            
-            ch->data_pool = new_pool;
-            ch->pool_size = new_size;
-        }
-        
-        // Add entry using offset instead of pointer
-        ecmdb_entry_t *entry = malloc(sizeof(ecmdb_entry_t));
-        if (!entry) break;
-        
-        entry->ecm_offset = ch->pool_used;
-        memcpy(ch->data_pool + ch->pool_used, ecm_buf, ecm_len);
-        ch->pool_used += ecm_len;
-        
-        memcpy(entry->cw, cw_buf, ECMDB_CW_LEN);
-        entry->ecm_len = ecm_len;
-        entry->hash = hash;
-        
-        uint32_t idx = hash % ECMDB_HASH_SIZE;
-        entry->next = ch->hash_table[idx];
-        ch->hash_table[idx] = entry;
-        
-        if (seen_count < 50000)
-            seen[seen_count++] = hash;
-        
-        ch->entry_count++;
-    }
-    
-    secure_zero(ecm_buf, sizeof(ecm_buf));
-    secure_zero(cw_buf, sizeof(cw_buf));
-    free(seen);
-    fclose(fp);
-    
-    if (skipped_count > 0)
-    {
-        cs_log("ECMDB: Skipped %u invalid entries in %s", 
-               skipped_count, filepath);
-    }
-    
-    if (length_mismatch > 0)
-    {
-        cs_log("ECMDB: Skipped %u entries with wrong length (expected %u bytes) in %s", 
-               length_mismatch, expected_len, filepath);
-    }
-    
-    return ch->entry_count > 0;
-}
-
-// DIRECT Mode - File Validation
-static int validate_channel_file(const char *filepath, uint8_t ecm_start, 
-                                  uint8_t ecm_end, uint32_t *valid_count,
-                                  uint32_t *invalid_count)
-{
-    FILE *fp = fopen(filepath, "r");
-    if (!fp) return 0;
-    
-    uint16_t expected_len = ecm_end - ecm_start;
-    char line[1024];
-    uint8_t ecm_buf[ECMDB_MAX_ECM_LEN], cw_buf[ECMDB_CW_LEN];
-    uint16_t ecm_len;
-    
-    *valid_count = 0;
-    *invalid_count = 0;
-    
-    while (fgets(line, sizeof(line), fp))
-    {
-        if (line[0] == '\n' || line[0] == '\r' || line[0] == '#')
-            continue;
-        
-        if (parse_ecm_line(line, ecm_buf, cw_buf, &ecm_len))
-        {
-            // Check if length matches filename specification
-            if (ecm_len == expected_len)
-                (*valid_count)++;
-            else
-                (*invalid_count)++;
-        }
-        else
-        {
-            (*invalid_count)++;
-        }
-    }
-    
-    secure_zero(ecm_buf, sizeof(ecm_buf));
-    secure_zero(cw_buf, sizeof(cw_buf));
-    fclose(fp);
-    
-    return (*valid_count > 0);
-}
-
-// ECM Search Functions
-static int search_ecm_direct(FILE *fp, const uint8_t *ecm_data, size_t ecm_len,
-                             uint8_t *cw, uint16_t expected_len)
-{
-    char line[1024];
-    uint8_t line_ecm[ECMDB_MAX_ECM_LEN], line_cw[ECMDB_CW_LEN];
-    uint16_t line_ecm_len;
-    
-    rewind(fp);
-    
-    while (fgets(line, sizeof(line), fp))
-    {
-        if (line[0] == '\n' || line[0] == '\r' || line[0] == '#')
-            continue;
-        
-        if (!parse_ecm_line(line, line_ecm, line_cw, &line_ecm_len))
-            continue;
-        
-        // Check length matches filename specification
-        if (line_ecm_len != expected_len)
-            continue;
-        
-        if (line_ecm_len == ecm_len && 
-            memcmp(ecm_data, line_ecm, ecm_len) == 0)
-        {
-            memcpy(cw, line_cw, ECMDB_CW_LEN);
-            secure_zero(line_ecm, sizeof(line_ecm));
-            secure_zero(line_cw, sizeof(line_cw));
-            return 1;
-        }
-    }
-    
-    secure_zero(line_ecm, sizeof(line_ecm));
-    secure_zero(line_cw, sizeof(line_cw));
-    return 0;
-}
-
-static int search_ecm_ram(ecmdb_channel_t *ch, const uint8_t *ecm_data,
-                          size_t ecm_len, uint8_t *cw)
-{
-    uint32_t hash = xxhash32(ecm_data, ecm_len, 0);
-    uint32_t idx = hash % ECMDB_HASH_SIZE;
-    
-    ecmdb_entry_t *entry = ch->hash_table[idx];
-    
-    while (entry)
-    {
-        if (entry->hash == hash && 
-            entry->ecm_len == ecm_len &&
-            memcmp(ecm_data, ch->data_pool + entry->ecm_offset, ecm_len) == 0)
-        {
-            memcpy(cw, entry->cw, ECMDB_CW_LEN);
-            return 1;
-        }
-        entry = entry->next;
-    }
-    
-    return 0;
+    return (ecmdb->mode == ECMDB_MODE_RAM) ? &ecmdb_backend_ram : &ecmdb_backend_direct;
 }
 
 // Channel Management
@@ -533,42 +233,24 @@ static int add_channel(const char *filepath, uint16_t caid, uint16_t srvid,
     
     if (!ch->filepath) return 0;
     
+    if (!ecmdb_backend()->load(ch, filepath, ecm_start, ecm_end))
+    {
+        cs_log("ECMDB: %04X@%04X [%d#%d] No valid entries found",
+               caid, srvid, ecm_start, ecm_end);
+        free(ch->filepath);
+        return 0;
+    }
+
     if (ecmdb->mode == ECMDB_MODE_RAM)
     {
-        if (!load_channel_ram(ch, filepath, ecm_start, ecm_end))
-        {
-            free(ch->filepath);
-            return 0;
-        }
-        
         cs_log("ECMDB: %04X@%04X [%d#%d] %u entries (%zu KB)", 
                caid, srvid, ecm_start, ecm_end, 
                ch->entry_count, ch->pool_used / 1024);
     }
     else
     {
-        // Validate file in DIRECT mode
-        uint32_t valid_count, invalid_count;
-        
-        if (!validate_channel_file(filepath, ecm_start, ecm_end, 
-                                   &valid_count, &invalid_count))
-        {
-            cs_log("ECMDB: %04X@%04X [%d#%d] No valid entries found", 
-                   caid, srvid, ecm_start, ecm_end);
-            free(ch->filepath);
-            return 0;
-        }
-        
-        if (invalid_count > 0)
-        {
-            cs_log("ECMDB: Skipped %u entries with wrong length (expected %u bytes) in %s", 
-                   invalid_count, (ecm_end - ecm_start), filepath);
-        }
-        
-        ch->entry_count = valid_count;
-        
         cs_log("ECMDB: %04X@%04X [%d#%d] %u entries (DIRECT mode)", 
-               caid, srvid, ecm_start, ecm_end, valid_count);
+               caid, srvid, ecm_start, ecm_end, ch->entry_count);
     }
     
     ecmdb->lookup_keys[ecmdb->channel_count] = make_lookup_key(caid, srvid);
@@ -617,6 +299,12 @@ static void scan_directory(const char *path)
     }
     
     closedir(dir);
+
+    if (ecmdb->channel_count >= ECMDB_MAX_CHANNELS)
+    {
+        cs_log("ECMDB: Channel limit (%d) reached, some files under %s may have been skipped", 
+               ECMDB_MAX_CHANNELS, path);
+    }
 }
 
 static ecmdb_channel_t* find_channel(uint16_t caid, uint16_t srvid, 
@@ -740,21 +428,8 @@ int8_t ecmdb_ecm(uint16_t caid, uint16_t srvid, const uint8_t *ecm, uint8_t *cw)
     }
     
     const uint8_t *ecm_data = &ecm[ch->ecm_start];
-    int found = 0;
-    
-    if (ecmdb->mode == ECMDB_MODE_RAM)
-    {
-        found = search_ecm_ram(ch, ecm_data, ecm_len, cw);
-    }
-    else
-    {
-        FILE *fp = cache_open(channel_idx);
-        if (fp)
-        {
-            found = search_ecm_direct(fp, ecm_data, ecm_len, cw, ecm_len);
-            cache_release(channel_idx);
-        }
-    }
+
+    int found = ecmdb_backend()->search(ecmdb, ch, channel_idx, ecm_data, ecm_len, cw);
     
     SAFE_MUTEX_UNLOCK(&ecmdb->lock);
     
@@ -767,38 +442,19 @@ void ecmdb_cleanup(void)
     
     SAFE_MUTEX_LOCK(&ecmdb->lock);
     
-    cache_close_all();
+    ecmdb_direct_cache_close_all(ecmdb);
     
     if (ecmdb->channels)
     {
-        uint32_t i, j;
+        uint32_t i;
         for (i = 0; i < ecmdb->channel_count; i++)
         {
             ecmdb_channel_t *ch = &ecmdb->channels[i];
             
             if (ch->filepath) free(ch->filepath);
-            
-            if (ch->hash_table)
-            {
-                for (j = 0; j < ECMDB_HASH_SIZE; j++)
-                {
-                    ecmdb_entry_t *entry = ch->hash_table[j];
-                    while (entry)
-                    {
-                        ecmdb_entry_t *next = entry->next;
-                        secure_zero(entry->cw, ECMDB_CW_LEN);
-                        free(entry);
-                        entry = next;
-                    }
-                }
-                free(ch->hash_table);
-            }
-            
-            if (ch->data_pool)
-            {
-                secure_zero(ch->data_pool, ch->pool_used);
-                free(ch->data_pool);
-            }
+
+            ecmdb_backend_ram.cleanup(ch);
+            ecmdb_backend_direct.cleanup(ch);
         }
         free(ecmdb->channels);
     }
