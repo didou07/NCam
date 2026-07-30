@@ -1,0 +1,89 @@
+	<DIV ID="apducommand">
+		<TABLE CLASS="apducmd" style="width:100%; table-layout:fixed;">
+			<TR>
+				<TH style="width:12%;">READER</TH>
+				<TH style="width:80%;">APDU CMD</TH>
+				<TH style="width:8%;"></TH>
+			</TR>
+			<TR>
+				<TD>
+					<SELECT ID="apdu_reader" style="width:100%;">
+						<option value="">Loading...</option>
+					</SELECT>
+				</TD>
+				<TD>
+					<INPUT type="text" ID="apdu_cmd" list="apdu_history" placeholder="Enter APDU command" style="width:100%;">
+					<datalist id="apdu_history"></datalist>
+				</TD>
+				<TD>
+					<INPUT type="button" ID="apdu_run" value="EXECUTE" style="width:100%;">
+				</TD>
+			</TR>
+		</TABLE>
+	</DIV>
+	<script type="text/javascript">
+	$(document).ready(function() {
+		var h = [];
+
+		function loadR() {
+			var s = $('#apdu_reader').empty();
+			$.get('//' + location.host + '/readers.html', function(d) {
+				var a = new Set();
+				var excluded = ['emulator', 'emu'];
+				$('<div>').html(d).find('a[href*="label="]').each(function() {
+					var href = $(this).attr('href').split('label=')[1];
+					var l = decodeURIComponent(href.split('&')[0]);
+					var isExcluded = excluded.some(function(e) { return l.toLowerCase().indexOf(e) !== -1; });
+					if (l && !a.has(l) && !isExcluded) {
+						s.append($('<option>').val(l).text(l));
+						a.add(l);
+					}
+				});
+				if (!a.size) s.append($('<option disabled>').text('No readers'));
+			}).fail(function() {
+				s.append($('<option disabled>').text('Load failed'));
+			});
+		}
+
+		function updateH() {
+			var d = $('#apdu_history').empty();
+			h.forEach(function(i) { d.append($('<option>').val(i)); });
+		}
+
+		function loadH() {
+			try {
+				var s = localStorage.getItem('apdu_h');
+				if (s) { h = JSON.parse(s); updateH(); }
+			} catch(e) {}
+		}
+
+		function saveH(c) {
+			if (c && h.indexOf(c) === -1) {
+				h.unshift(c);
+				if (h.length > 10) h.pop();
+				try { localStorage.setItem('apdu_h', JSON.stringify(h)); } catch(e) {}
+				updateH();
+			}
+		}
+
+		$('#apdu_cmd').on('input', function() {
+			$(this).val($(this).val().replace(/[^0-9A-Fa-f]/g, ''));
+		});
+
+		loadR();
+		loadH();
+
+		$('#apdu_run').click(function() {
+			var r = $('#apdu_reader').val(), c = $('#apdu_cmd').val().trim();
+			if (!r || !c) return;
+			$.get('//' + location.host + '/ncamapi.xml?part=sendcmd&label=' + encodeURIComponent(r) + '&cmd=' + encodeURIComponent(c), function() {
+				saveH(c);
+				$('#apdu_cmd').val('');
+			});
+		});
+
+		$('#apdu_cmd').keypress(function(e) {
+			if (e.which === 13) $('#apdu_run').click();
+		});
+	});
+	</script>

@@ -742,6 +742,7 @@ void client_check_status(struct s_client *cl)
 
 		case 'r':
 			cardreader_checkhealth(cl, cl->reader);
+			cardreader_check_fastreset(cl, cl->reader);
 			break;
 
 		case 'p':

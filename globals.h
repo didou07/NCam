@@ -428,7 +428,7 @@ typedef uint8_t uint8_t;
 #define MAX_EMM_SIZE     512
 #endif
 
-#if defined(WITH_SENDCMD) && defined(READER_VIDEOGUARD)
+#ifdef WITH_SENDCMD
 #define MAX_CMD_SIZE 0xff + 5  // maximum value from length byte + command header
 #endif
 
@@ -935,7 +935,7 @@ typedef struct s_entitlement            // contains entitlement Info
 struct s_client;
 struct ecm_request_t;
 struct emm_packet_t;
-#if defined(WITH_SENDCMD) && defined(READER_VIDEOGUARD)
+#ifdef WITH_SENDCMD
 struct cmd_packet_t;
 #endif
 struct s_ecm_answer;
@@ -1053,7 +1053,7 @@ struct s_cardsystem
 	int32_t (*do_ecm)(struct s_reader *, const struct ecm_request_t *, struct s_ecm_answer *);
 	int32_t (*do_emm_reassembly)(struct s_reader *, struct s_client *, struct emm_packet_t *); // Returns 1/true if the EMM is ready to be written in the card
 	int32_t         (*do_emm)(struct s_reader *, struct emm_packet_t *);
-#if defined(WITH_SENDCMD) && defined(READER_VIDEOGUARD)
+#ifdef WITH_SENDCMD
 	int32_t         (*do_rawcmd)(struct s_reader *, struct cmd_packet_t *);
 #endif
 	void            (*post_process)(struct s_reader *);
@@ -1617,7 +1617,7 @@ typedef struct emm_packet_t
 	struct s_client *client;
 } EMM_PACKET;
 
-#if defined(WITH_SENDCMD) && defined(READER_VIDEOGUARD)
+#ifdef WITH_SENDCMD
 typedef struct cmd_packet_t
 {
 	uint8_t			cmd[MAX_CMD_SIZE];
@@ -1818,6 +1818,15 @@ struct s_reader
 	int8_t          deprecated;                     //if 0 ATR obeyed, if 1 default speed (9600) is chosen; for devices that cannot switch baudrate
 #endif
 	int8_t          resetalways;                    // send reset after each commands (for pscs)
+	// Fast reset: periodically forces a card reset via the reader's own
+	// generic hardware path (ICC_Async_Reset(), same one used at reader
+	// startup) - works identically for any physical reader type (PCSC,
+	// internal SCI, sc8in1, smartreader, etc.), unlike a card-system-
+	// specific reset hack. See cardreader_check_fastreset() in
+	// reader-common.c.
+	int8_t          fastreset_enabled;
+	int32_t         fastreset_interval;             // seconds between forced resets
+	time_t          fastreset_next;                 // runtime: next due time
 	struct          s_module ph;
 	const struct    s_cardreader *crdr;
 	void            *crdr_data;                     // Private card reader data
@@ -2050,8 +2059,6 @@ struct s_reader
 #endif
 #ifdef READER_CONAX
 	uint8_t         cnxlastecm;                     // == 0 - last ecm has not been paired ecm, > 0 last ecm has been paired ecm
-	int8_t          conax_reset_enabled;
-	int32_t         conax_reset_interval;
 	int8_t          conax_cardinfo_enabled;
 #endif
 	LLIST           *emmstat;                       //emm stats

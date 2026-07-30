@@ -48,8 +48,9 @@ void cardreader_do_reset(struct s_reader *reader);
 void cardreader_reset(struct s_client *cl);
 int32_t cardreader_do_checkhealth(struct s_reader *reader);
 void cardreader_checkhealth(struct s_client *cl, struct s_reader *rdr);
+void cardreader_check_fastreset(struct s_client *cl, struct s_reader *rdr);
 int32_t cardreader_do_emm(struct s_reader *reader, EMM_PACKET *ep);
-#if defined(WITH_SENDCMD) && defined(READER_VIDEOGUARD)
+#ifdef WITH_SENDCMD
 int32_t cardreader_do_rawcmd(struct s_reader *reader, CMD_PACKET *cp);
 #endif
 void cardreader_process_ecm(struct s_reader *reader, struct s_client *cl, ECM_REQUEST *er);
@@ -73,6 +74,7 @@ static inline int32_t cardreader_do_checkhealth(struct s_reader *UNUSED(reader))
 	return false;
 }
 static inline void cardreader_checkhealth(struct s_client *UNUSED(cl), struct s_reader *UNUSED(rdr)) { }
+static inline void cardreader_check_fastreset(struct s_client *UNUSED(cl), struct s_reader *UNUSED(rdr)) { }
 static inline int32_t cardreader_do_emm(struct s_reader *UNUSED(reader), EMM_PACKET *UNUSED(ep))
 {
 	return 0;

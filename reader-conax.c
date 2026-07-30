@@ -2,99 +2,7 @@
 #ifdef READER_CONAX
 #include "cscrypt/bn.h"
 #include "reader-common.h"
-#include "csctapi/ifd_sci_ioctl.h"
-#include "csctapi/io_serial.h"
-#include "csctapi/icc_async.h"
 #include "ncam-time.h"
-
-struct conax_data {
-    pthread_t reset_thread;
-    volatile int8_t thread_running;
-    int8_t thread_started;         // Set once reset_thread has actually been created
-    time_t last_reset_time;
-};
-
-static void *auto_reset_thread(void *arg)
-{
-    struct s_reader *reader = (struct s_reader *)arg;
-    struct conax_data *csystem_data = (struct conax_data *)reader->csystem_data;
-
-    set_thread_name(__func__);
-
-    while(csystem_data->thread_running && reader->enable)
-    {
-        if(!reader->conax_reset_enabled)
-        {
-            sleep(1);
-            continue;
-        }
-
-        int i;
-        for(i = 0; i < reader->conax_reset_interval && csystem_data->thread_running; i++)
-        {
-            sleep(1);
-        }
-
-        if(!csystem_data->thread_running || !reader->enable || !reader->conax_reset_enabled)
-            continue;
-
-        #ifdef WITH_CARDREADER
-        const struct s_cardreader *crdr_ops = reader->crdr;
-
-        if(reader->typ == R_INTERNAL)
-        {
-            #ifdef CARDREADER_INTERNAL_SCI
-            if(reader->handle > 0)
-            {
-                int32_t card_present = 0;
-                if(ioctl(reader->handle, IOCTL_GET_IS_CARD_PRESENT, &card_present) >= 0 && card_present)
-                {
-                    if(crdr_ops && crdr_ops->flush)
-                        IO_Serial_Flush(reader);
-
-                    if(ioctl(reader->handle, IOCTL_SET_RESET, 1) >= 0)
-                    {
-                        cs_sleepms(50);
-
-                        uint8_t atr_buf[ATR_MAX_SIZE];
-
-                        if(IO_Serial_Read(reader, 0, 500, reader->card_atr_length, atr_buf) == 0)
-                        {
-                            if(atr_buf[0] == 0x3B || atr_buf[0] == 0x3F)
-                            {
-                                ioctl(reader->handle, IOCTL_SET_ATR_READY, 1);
-                                memcpy(reader->card_atr, atr_buf, reader->card_atr_length);
-                                csystem_data->last_reset_time = time(NULL);
-                            }
-                        }
-                    }
-                }
-            }
-            #endif
-        }
-        else if(crdr_ops && crdr_ops->activate)
-        {
-            ATR atr;
-
-            if(crdr_ops->activate(reader, &atr) == OK)
-            {
-                uint8_t atr_buf[ATR_MAX_SIZE];
-                uint32_t atr_size = 0;
-
-                if(ATR_GetRaw(&atr, atr_buf, &atr_size) == ATR_OK && atr_size > 0)
-                {
-                    memcpy(reader->card_atr, atr_buf, atr_size);
-                    reader->card_atr_length = atr_size;
-                    csystem_data->last_reset_time = time(NULL);
-                }
-            }
-        }
-        #endif
-    }
-
-    csystem_data->thread_running = 0;
-    return NULL;
-}
 
 static int32_t RSA_CNX(struct s_reader *reader, uint8_t *msg, uint8_t *mod, uint8_t *exp, uint32_t cta_lr, uint32_t modbytes, uint32_t expbytes)
 {
@@ -321,36 +229,6 @@ static int32_t conax_card_init(struct s_reader *reader, ATR *newatr)
 		rdr_log_sensitive(reader, "Provider: %d SharedAddress: {%08X}", j + 1, b2i(4, reader->sa[j]));
 	}
 
-	if(!cs_malloc(&reader->csystem_data, sizeof(struct conax_data)))
-		{ return ERROR; }
-
-    struct conax_data *csystem_data = (struct conax_data *)reader->csystem_data;
-    memset(csystem_data, 0, sizeof(struct conax_data));
-
-    csystem_data->last_reset_time = time(NULL);
-    csystem_data->thread_running = 1;
-
-    if(reader->conax_reset_enabled)
-    {
-        if(pthread_create(&csystem_data->reset_thread, NULL, auto_reset_thread, reader) != 0)
-        {
-            csystem_data->thread_running = 0;
-            NULLFREE(reader->csystem_data);
-            return ERROR;
-        }
-
-        // Kept joinable (not detached) so conax_card_done() can wait for a
-        // deterministic shutdown instead of relying only on reader->enable
-        // being noticed on the thread's next poll (up to ~1s later).
-        csystem_data->thread_started = 1;
-        rdr_log(reader, "Auto-reset: %d seconds",
-            reader->conax_reset_interval);
-    }
-    else
-    {
-        rdr_log(reader, "Auto reset disabled");
-    }
-
 	return OK;
 }
 
@@ -483,7 +361,7 @@ static int32_t conax_do_ecm(struct s_reader *reader, const ECM_REQUEST *er, stru
 	/* answer 9011 - conax smart card need reset */
 	if(2 <= cta_lr && 0x90 == cta_res[cta_lr - 2] && 0x11 == cta_res[cta_lr - 1])
 	{
-		if(reader->conax_reset_enabled)
+		if(reader->fastreset_enabled)
 		{
 			rdr_log(reader, "Card response 9011 skipped");
 		}
@@ -708,30 +586,6 @@ static int32_t conax_card_info(struct s_reader *reader)
 	return OK;
 }
 
-/*
- * Conax Reader Shutdown Hook
- * Purpose: Deterministically stops the auto-reset thread (if running) and
- * frees the reader's csystem_data, instead of leaving thread teardown to
- * happen implicitly whenever the detached thread next wakes up and notices
- * reader->enable went to 0 (previously up to ~1s of delay, and the memory
- * was never explicitly freed here at all).
- * Called by the generic struct s_cardsystem.card_done hook, which NCam
- * already invokes from cardreader_close()/reader shutdown paths.
- */
-static void conax_card_done(struct s_reader *reader)
-{
-    struct conax_data *csystem_data = (struct conax_data *)reader->csystem_data;
-    if(!csystem_data) return;
-
-    if(csystem_data->thread_started)
-    {
-        csystem_data->thread_running = 0;    // Signal thread to exit
-        pthread_join(csystem_data->reset_thread, NULL);
-    }
-
-    NULLFREE(reader->csystem_data);
-}
-
 const struct s_cardsystem reader_conax =
 {
 	.desc           = "conax",
@@ -740,7 +594,6 @@ const struct s_cardsystem reader_conax =
 	.do_ecm         = conax_do_ecm,
 	.card_info      = conax_card_info,
 	.card_init      = conax_card_init,
-	.card_done      = conax_card_done,
 	.get_emm_type   = conax_get_emm_type,
 	.get_emm_filter = conax_get_emm_filter,
 };

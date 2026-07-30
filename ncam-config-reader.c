@@ -1704,8 +1704,6 @@ static const struct config_list reader_opts[] =
 	DEF_OPT_FUNC("boxid"                          , 0,                                    boxid_fn),
 #endif
 #ifdef READER_CONAX
-	DEF_OPT_INT8("conax_reset_enabled"            , OFS(conax_reset_enabled),             0),
-	DEF_OPT_INT32("conax_reset_interval"          , OFS(conax_reset_interval),            60),
 	DEF_OPT_INT8("conax_cardinfo_enabled"         , OFS(conax_cardinfo_enabled),          1),
 #endif
 #if defined(READER_STREAMGUARD) || defined(READER_TONGFANG) || defined(READER_JET)
@@ -1848,6 +1846,8 @@ static const struct config_list reader_opts[] =
 	DEF_OPT_STR("ecmdb_path"                      , OFS(ecmdb_path),                      NULL),
 #endif
 	DEF_OPT_INT8("resetalways"                    , OFS(resetalways),                     0),
+	DEF_OPT_INT8("fastreset_enabled"              , OFS(fastreset_enabled),               0),
+	DEF_OPT_INT32("fastreset_interval"            , OFS(fastreset_interval),              60),
 #ifdef WITH_CARDREADER
 	DEF_OPT_INT8("deprecated"                     , OFS(deprecated),                      0),
 #endif

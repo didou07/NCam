@@ -48,6 +48,8 @@
 
 #ifdef WITH_CARDREADER
 
+#define WITH_SENDCMD 1
+
 #define READER_NAGRA 1
 #define READER_NAGRA_MERLIN 1
 #define READER_IRDETO 1

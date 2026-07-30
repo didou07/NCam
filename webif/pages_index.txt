@@ -203,6 +203,7 @@ LOGPAGE                       logpage/logpage.html                              
 LOGMENU                       logpage/logpage_menu.html                                   WEBIF_LIVELOG
 LOGDEBUGMENU                  logpage/logpage_debugmenu.html                              WEBIF_LIVELOG
 LOGSIZEMENU                   logpage/logpage_sizemenu.html                               WEBIF_LIVELOG
+LOGSENDCMD                    logpage/logpage_sendcmd.html                                WITH_SENDCMD
 
 READERCONFIG                  readerconfig/readerconfig.html
 READERCONFIGIPV6BIT           readerconfig/readerconfig_ipv6bit.html                      IPV6SUPPORT

@@ -332,6 +332,36 @@ void cardreader_checkhealth(struct s_client *cl, struct s_reader *rdr)
 	add_job(cl, ACTION_READER_CHECK_HEALTH, NULL, 0);
 }
 
+/*
+ * Generic Periodic Fast-Reset
+ * Purpose: Forces a card reset at a configurable interval, for any
+ * physical reader type - not a card-system-specific hack. Reuses the
+ * exact same ACTION_READER_RESET_FAST job the emergency-recovery path in
+ * reader-videoguard2.c already relies on, which in turn goes through
+ * cardreader_do_reset() -> ICC_Async_Reset() -> reader->crdr (the
+ * reader's own hardware ops: PCSC, internal SCI, sc8in1, smartreader,
+ * stinger, etc). No reader-type-specific code needed here at all.
+ * Called from the reader client's existing periodic tick (see the 'r'
+ * case alongside cardreader_checkhealth() in ncam-client.c) - no
+ * dedicated thread required.
+ */
+void cardreader_check_fastreset(struct s_client *cl, struct s_reader *rdr)
+{
+	if(!rdr || !rdr->enable || !rdr->active || !rdr->fastreset_enabled)
+		{ return; }
+
+	if(rdr->fastreset_interval <= 0)
+		{ return; }
+
+	time_t now = time(NULL);
+	if(rdr->fastreset_next && now < rdr->fastreset_next)
+		{ return; }
+
+	rdr_log(rdr, "Fast-reset triggered (interval: %ds)", rdr->fastreset_interval);
+	add_job(cl, ACTION_READER_RESET_FAST, NULL, 0);
+	rdr->fastreset_next = now + rdr->fastreset_interval;
+}
+
 void cardreader_reset(struct s_client *cl)
 {
 	add_job(cl, ACTION_READER_RESET, NULL, 0);
@@ -541,7 +571,7 @@ int32_t cardreader_do_emm(struct s_reader *reader, EMM_PACKET *ep)
 	return (rc);
 }
 
-#if defined(WITH_SENDCMD) && defined(READER_VIDEOGUARD)
+#ifdef WITH_SENDCMD
 int32_t cardreader_do_rawcmd(struct s_reader *reader, CMD_PACKET *cp)
 {
 	int32_t rc;

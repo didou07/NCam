@@ -2558,6 +2558,10 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 	// reset cycle mode
 	tpl_addVar(vars, TPLADD, "RESTARTFORRESETCYCLECHCECKED", (rdr->restartforresetcycle == 1) ? "checked" : "");
 
+	// Fast Reset (generic, any physical reader type - see cardreader_check_fastreset())
+	tpl_addVar(vars, TPLADD, "FASTRESETENABLEDCHECKED", (rdr->fastreset_enabled == 1) ? "checked" : "");
+	tpl_printf(vars, TPLADD, "FASTRESETINTERVAL", "%d", rdr->fastreset_interval);
+
 	// Auto Restart after
 	tpl_printf(vars, TPLADD, "AUTORESTARTSECONDS", "%d", rdr->autorestartseconds);
 
@@ -2850,9 +2854,6 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 #endif
 
 #ifdef READER_CONAX
-	tpl_addVar(vars, TPLAPPEND, "CONAX_RESET_ENABLED", 
-				(rdr->conax_reset_enabled == 1) ? "checked" : "");
-	tpl_printf(vars, TPLAPPEND, "CONAX_RESET_INTERVAL", "%d", rdr->conax_reset_interval);
 	tpl_addVar(vars, TPLAPPEND, "CONAX_CARDINFO_ENABLED", 
 				(rdr->conax_cardinfo_enabled == 1) ? "checked" : "");
 #endif
@@ -5764,6 +5765,9 @@ static char *send_ncam_logpoll(struct templatevars * vars, struct uriparams * pa
 	tpl_addVar(vars, TPLADD, "LOG_DEBUGMENU", tpl_getTpl(vars, "LOGDEBUGMENU"));
 #endif
 	tpl_addVar(vars, TPLADD, "LOG_SIZEMENU", tpl_getTpl(vars, "LOGSIZEMENU"));
+#ifdef WITH_SENDCMD
+	tpl_addVar(vars, TPLADD, "VIEW_SENDCMD", tpl_getTpl(vars, "LOGSENDCMD"));
+#endif
 	tpl_addVar(vars, TPLADD, "TITLEADD1", "Move mouse over log-window to stop scroll");
 
 	if(strcmp(getParam(params, "lastid"), "start") == 0){
@@ -8805,7 +8809,7 @@ static char *send_ncam_api(struct templatevars * vars, FILE * f, struct uriparam
 			return tpl_getTpl(vars, "APIERROR");
 		}
 	}
-#if defined(WITH_SENDCMD) && defined(READER_VIDEOGUARD)
+#ifdef WITH_SENDCMD
 	else if(strcmp(getParam(params, "part"), "sendcmd") == 0)
 	{
 		if(strcmp(getParam(params, "label"), ""))

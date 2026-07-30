@@ -19,6 +19,8 @@
 ##TPLREADERPINCODE##
 ##TPLREADERCONFIGNANO##
 				<TR><TD><A>Reset after No. ECM:</A></TD><TD><input name="resetcycle" class="short" type="text" maxlength="5" value="##RESETCYCLE##"></TD></TR>
+				<TR><TD><A>Fast Reset Enabled:</A></TD><TD><input name="fastreset_enabled" type="hidden" value="0"><input name="fastreset_enabled" type="checkbox" value="1" ##FASTRESETENABLEDCHECKED##><label>Periodically force a card reset, for any reader type</label></TD></TR>
+				<TR><TD><A>Fast Reset Interval:</A></TD><TD><input name="fastreset_interval" class="short" type="text" maxlength="5" value="##FASTRESETINTERVAL##"> seconds (default: 60)</TD></TR>
 				<TR><TD><A>Deprecated:</A></TD><TD><input name="deprecated" type="hidden" value="0"><input name="deprecated" type="checkbox" value="1" ##DEPRECATEDCHECKED##><label></label></TD></TR>
 ##TPLREADERCONFIGCRYPTOWORKS##
 ##TPLREADERCONFIGNAGRA##
