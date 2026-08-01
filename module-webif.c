@@ -2854,8 +2854,20 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 #endif
 
 #ifdef READER_CONAX
+	tpl_addVar(vars, TPLAPPEND, "CONAX_ECM_ENABLED", 
+				(rdr->conax_ecm_enabled == 1) ? "checked" : "");
+	tpl_addVar(vars, TPLAPPEND, "CONAX_EMM_ENABLED", 
+				(rdr->conax_emm_enabled == 1) ? "checked" : "");
 	tpl_addVar(vars, TPLAPPEND, "CONAX_CARDINFO_ENABLED", 
 				(rdr->conax_cardinfo_enabled == 1) ? "checked" : "");
+	tpl_addVar(vars, TPLAPPEND, "CONAX_PAIRING_ENABLED", 
+				(rdr->conax_pairing_enabled == 1) ? "checked" : "");
+	tpl_addVar(vars, TPLAPPEND, "CONAX_PIN_ENABLED", 
+				(rdr->conax_pin_enabled == 1) ? "checked" : "");
+	tpl_addVar(vars, TPLAPPEND, "CONAX_CARDINFO_PACKAGES_ENABLED", 
+				(rdr->conax_cardinfo_packages_enabled == 1) ? "checked" : "");
+	tpl_addVar(vars, TPLAPPEND, "CONAX_CARDINFO_PPV_ENABLED", 
+				(rdr->conax_cardinfo_ppv_enabled == 1) ? "checked" : "");
 #endif
 #ifdef READER_NAGRA_MERLIN
 	// mod1 (CAK7)

@@ -132,13 +132,20 @@ static uint8_t PairingECMRotation(struct s_reader *reader, const ECM_REQUEST *er
 
 	if((0 == reader->cnxlastecm) != (0 == cnxcurrecm))
 	{
-		if(0 == cnxcurrecm) // not paired
-			{ ins26[7] = 0x30; }
+		if(!reader->conax_pairing_enabled)
+		{
+			rdr_log_dbg(reader, D_READER, "Pairing rotation disabled, skipping DD 26 write");
+		}
 		else
-			{ ins26[7] = 0x40; }
+		{
+			if(0 == cnxcurrecm) // not paired
+				{ ins26[7] = 0x30; }
+			else
+				{ ins26[7] = 0x40; }
 
-		if(read_record(reader, ins26, ins26 + 5, cta_res) <= 0)
-			{ rdr_log(reader, "PairingECMRotation - ERROR"); }
+			if(read_record(reader, ins26, ins26 + 5, cta_res) <= 0)
+				{ rdr_log(reader, "PairingECMRotation - ERROR"); }
+		}
 	}
 	reader->cnxlastecm = cnxcurrecm;
 	return cnxcurrecm;
@@ -246,6 +253,11 @@ static int32_t conax_send_pin(struct s_reader *reader)
 
 static int32_t conax_do_ecm(struct s_reader *reader, const ECM_REQUEST *er, struct s_ecm_answer *ea)
 {
+	if(!reader->conax_ecm_enabled)
+	{
+		rdr_log_dbg(reader, D_READER, "ECM disabled");
+		return ERROR;
+	}
 	def_resp;
 	int32_t i, j, n, num_dw = 0, rc = 0;
 	uint8_t insA2[] = { 0xDD, 0xA2, 0x00, 0x00, 0x00 };
@@ -305,6 +317,10 @@ static int32_t conax_do_ecm(struct s_reader *reader, const ECM_REQUEST *er, stru
 							if((cta_res[i + 1] == 0x02 && cta_res[i + 2] == 0x00 && cta_res[i + 3] == 0x00) || \
 									(cta_res[i + 1] == 0x02 && cta_res[i + 2] == 0x40 && cta_res[i + 3] == 0x00))
 								{ break; }
+							else if(!reader->conax_pin_enabled)
+							{
+								rdr_log_dbg(reader, D_READER, "PIN send disabled, skipping DD C8 write");
+							}
 							else if(strcmp(reader->pincode, "none"))
 							{
 								conax_send_pin(reader);
@@ -469,6 +485,11 @@ static int32_t conax_get_emm_filter(struct s_reader *rdr, struct s_csystem_emm_f
 
 static int32_t conax_do_emm(struct s_reader *reader, EMM_PACKET *ep)
 {
+	if(!reader->conax_emm_enabled)
+	{
+		rdr_log_dbg(reader, D_EMM, "EMM disabled");
+		return ERROR;
+	}
 	def_resp;
 	uint8_t insCA[] = { 0xDD, 0xCA, 0x00, 0x00, 0x00 };
 	uint8_t insEMM[] = { 0xDD, 0x84, 0x00, 0x00, 0x00 };
@@ -522,6 +543,16 @@ static int32_t conax_card_info(struct s_reader *reader)
 
 	for(type = 0; type < 2; type++)
 	{
+		if(type == 0 && !reader->conax_cardinfo_packages_enabled)
+		{
+			rdr_log_dbg(reader, D_READER, "Package list disabled, skipping DD C6 read");
+			continue;
+		}
+		if(type == 1 && !reader->conax_cardinfo_ppv_enabled)
+		{
+			rdr_log_dbg(reader, D_READER, "PPV-Event list disabled, skipping DD 26 read");
+			continue;
+		}
 		n = 0;
 		write_cmd(cmd[type], cmd[type] + 5);
 		while(cta_res[cta_lr - 2] == 0x98)

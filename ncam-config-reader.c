@@ -1704,7 +1704,13 @@ static const struct config_list reader_opts[] =
 	DEF_OPT_FUNC("boxid"                          , 0,                                    boxid_fn),
 #endif
 #ifdef READER_CONAX
+	DEF_OPT_INT8("conax_ecm_enabled"              , OFS(conax_ecm_enabled),               1),
+	DEF_OPT_INT8("conax_emm_enabled"              , OFS(conax_emm_enabled),               1),
 	DEF_OPT_INT8("conax_cardinfo_enabled"         , OFS(conax_cardinfo_enabled),          1),
+	DEF_OPT_INT8("conax_pairing_enabled"          , OFS(conax_pairing_enabled),           1),
+	DEF_OPT_INT8("conax_pin_enabled"              , OFS(conax_pin_enabled),               1),
+	DEF_OPT_INT8("conax_cardinfo_packages_enabled", OFS(conax_cardinfo_packages_enabled), 1),
+	DEF_OPT_INT8("conax_cardinfo_ppv_enabled"     , OFS(conax_cardinfo_ppv_enabled),      1),
 #endif
 #if defined(READER_STREAMGUARD) || defined(READER_TONGFANG) || defined(READER_JET)
 	DEF_OPT_INT32("cas_version"                   , OFS(cas_version),                     0),

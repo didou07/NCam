@@ -2059,7 +2059,16 @@ struct s_reader
 #endif
 #ifdef READER_CONAX
 	uint8_t         cnxlastecm;                     // == 0 - last ecm has not been paired ecm, > 0 last ecm has been paired ecm
-	int8_t          conax_cardinfo_enabled;
+	// Per-function toggles
+	int8_t          conax_ecm_enabled;              // master toggle for do_ecm (0x DD A2 write + DD CA read)
+	int8_t          conax_emm_enabled;              // master toggle for do_emm (0x DD 84 write + DD CA read)
+	int8_t          conax_cardinfo_enabled;         // master toggle for card_info (packages + ppv events)
+	// Per-command toggles within ECM
+	int8_t          conax_pairing_enabled;          // pairing rotation write (DD 26, before ECM)
+	int8_t          conax_pin_enabled;              // send pincode on 0x31 challenge (DD C8)
+	// Per-command toggles within Card Info
+	int8_t          conax_cardinfo_packages_enabled; // fetch Package list (DD C6)
+	int8_t          conax_cardinfo_ppv_enabled;      // fetch PPV-Event list (DD 26)
 #endif
 	LLIST           *emmstat;                       //emm stats
 	CS_MUTEX_LOCK   emmstat_lock;
