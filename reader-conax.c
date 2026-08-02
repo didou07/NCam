@@ -162,6 +162,16 @@ static int32_t conax_card_init(struct s_reader *reader, ATR *newatr)
 	uint8_t cardver = 0;
 	uint16_t card_caid = 0; // CAID override: store card's original CAID
 
+	// The card's internal pairing state is cleared by any reset, but our
+	// tracked cnxlastecm was never resynced - meaning the very first ECM
+	// after any reset (fastreset, or the reactive recovery below on a
+	// 9011 hang) could make PairingECMRotation assume the card is still
+	// in whatever pairing state it was in before the reset, and request
+	// the wrong ECM response format (RSA-encrypted vs. plain). The CW
+	// bytes still come back and look superficially valid (right length),
+	// but decrypt to garbage - which shows as "CW found, but no picture".
+	reader->cnxlastecm = 0;
+
 	get_hist;
 	if((hist_size < 4) || (memcmp(hist, "0B00", 4)))
 		{ return ERROR; }
@@ -543,7 +553,7 @@ static int32_t conax_card_info(struct s_reader *reader)
 
 	for(type = 0; type < 2; type++)
 	{
-		if(type == 0 && !reader->conax_cardinfo_packages_enabled)
+		if(type == 0 && !reader->conax_packages_enabled)
 		{
 			rdr_log_dbg(reader, D_READER, "Package list disabled, skipping DD C6 read");
 			continue;

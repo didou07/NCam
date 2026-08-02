@@ -1709,7 +1709,7 @@ static const struct config_list reader_opts[] =
 	DEF_OPT_INT8("conax_cardinfo_enabled"         , OFS(conax_cardinfo_enabled),          1),
 	DEF_OPT_INT8("conax_pairing_enabled"          , OFS(conax_pairing_enabled),           1),
 	DEF_OPT_INT8("conax_pin_enabled"              , OFS(conax_pin_enabled),               1),
-	DEF_OPT_INT8("conax_cardinfo_packages_enabled", OFS(conax_cardinfo_packages_enabled), 1),
+	DEF_OPT_INT8("conax_packages_enabled", OFS(conax_packages_enabled), 1),
 	DEF_OPT_INT8("conax_cardinfo_ppv_enabled"     , OFS(conax_cardinfo_ppv_enabled),      1),
 #endif
 #if defined(READER_STREAMGUARD) || defined(READER_TONGFANG) || defined(READER_JET)

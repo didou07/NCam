@@ -2067,7 +2067,7 @@ struct s_reader
 	int8_t          conax_pairing_enabled;          // pairing rotation write (DD 26, before ECM)
 	int8_t          conax_pin_enabled;              // send pincode on 0x31 challenge (DD C8)
 	// Per-command toggles within Card Info
-	int8_t          conax_cardinfo_packages_enabled; // fetch Package list (DD C6)
+	int8_t          conax_packages_enabled; // fetch Package list (DD C6)
 	int8_t          conax_cardinfo_ppv_enabled;      // fetch PPV-Event list (DD 26)
 #endif
 	LLIST           *emmstat;                       //emm stats

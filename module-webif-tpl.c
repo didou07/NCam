@@ -569,6 +569,19 @@ char *tpl_getTpl(struct templatevars *vars, const char *name)
 				respos += tmp;
 				tpl = pch + 2;
 			}
+			else
+			{
+				// Token name too long (>=30 chars) or malformed/unterminated
+				if(respos + 2 >= allocated)
+				{
+					allocated = respos + 256;
+					if(!cs_realloc(&result, allocated)) { return ""; }
+				}
+				result[respos] = tpl[0];
+				result[respos + 1] = tpl[1];
+				respos += 2;
+				tpl += 2;
+			}
 		}
 		else
 		{
