@@ -6,6 +6,7 @@ enum actions
 	// Reader action
 	ACTION_READER_IDLE         = 1,     // wr01
 	ACTION_READER_REMOTE       = 2,     // wr02
+	ACTION_READER_OLD_ECM      = 3,     // wr03
 	ACTION_READER_RESET        = 4,     // wr04
 	ACTION_READER_ECM_REQUEST  = 5,     // wr05
 	ACTION_READER_EMM          = 6,     // wr06

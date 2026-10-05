@@ -1564,6 +1564,15 @@ void reader_fixups_fn(void *var)
 	caidtab2ftab_add(&rdr->cacheex.localgenerated_only_caidtab, &rdr->cacheex.lg_only_tab);
 	caidtab_clear(&rdr->cacheex.localgenerated_only_caidtab);
 #endif
+	if(rdr->old_ecm_source < 0 || rdr->old_ecm_source > 1)
+		rdr->old_ecm_source = 0;
+	if(rdr->old_ecm_trigger < 0 || rdr->old_ecm_trigger > 1)
+		rdr->old_ecm_trigger = 0;
+	if(rdr->old_ecm_interval < 1 || rdr->old_ecm_interval > 86400)
+		rdr->old_ecm_interval = 60;
+	if(rdr->old_ecm_successes < 1 || rdr->old_ecm_successes > 1000000)
+		rdr->old_ecm_successes = 10;
+
 	if(is_cascading_reader(rdr) && (rdr->typ == R_CAMD35 || rdr->typ == R_CS378X))
 	{
 #ifdef CS_CACHEEX
@@ -1854,6 +1863,12 @@ static const struct config_list reader_opts[] =
 	DEF_OPT_INT8("resetalways"                    , OFS(resetalways),                     0),
 	DEF_OPT_INT8("fastreset_enabled"              , OFS(fastreset_enabled),               0),
 	DEF_OPT_INT32("fastreset_interval"            , OFS(fastreset_interval),              60),
+	DEF_OPT_INT8("old_ecm_enabled"                , OFS(old_ecm_enabled),                 0),
+	DEF_OPT_INT8("old_ecm_source"                 , OFS(old_ecm_source),                  0),
+	DEF_OPT_INT8("old_ecm_trigger"                , OFS(old_ecm_trigger),                 0),
+	DEF_OPT_INT32("old_ecm_interval"              , OFS(old_ecm_interval),                60),
+	DEF_OPT_INT32("old_ecm_successes"             , OFS(old_ecm_successes),               10),
+	DEF_OPT_SSTR("old_ecm"                     , OFS(old_ecm),                         "", SIZEOF(old_ecm)),
 #ifdef WITH_CARDREADER
 	DEF_OPT_INT8("deprecated"                     , OFS(deprecated),                      0),
 #endif
@@ -1911,7 +1926,8 @@ static bool reader_check_setting(const struct config_list *UNUSED(clist), void *
 #ifdef WITH_AZBOX
 		"mode",
 #endif
-		"resetalways", "deprecated", "ndsversion",
+		"resetalways", "deprecated", "ndsversion", "fastreset_enabled", "fastreset_interval",
+		"old_ecm_enabled", "old_ecm_source", "old_ecm_trigger", "old_ecm_interval", "old_ecm_successes", "old_ecm",
 		0
 	};
 	// These are written only when the reader is network reader

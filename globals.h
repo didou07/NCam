@@ -1827,6 +1827,19 @@ struct s_reader
 	int8_t          fastreset_enabled;
 	int32_t         fastreset_interval;             // seconds between forced resets
 	time_t          fastreset_next;                 // runtime: next due time
+	int8_t          old_ecm_enabled;                // reuse a successful ECM for periodic card activity
+	int8_t          old_ecm_source;                 // 0=auto first successful ECM, 1=manual configured ECM
+	int8_t          old_ecm_trigger;                // 0=interval, 1=successful ECM count
+	int32_t         old_ecm_interval;               // seconds between old ECM attempts
+	int32_t         old_ecm_successes;              // successful live ECMs between old ECM attempts
+	char            old_ecm[MAX_ECM_SIZE * 2 + 1];  // manual ECM in hexadecimal
+	uint8_t         old_ecm_data[MAX_ECM_SIZE];     // runtime ECM
+	uint16_t        old_ecm_len;
+	uint32_t        old_ecm_success_count;
+	time_t          old_ecm_last_run;
+	uint8_t         old_ecm_valid;
+	uint8_t         old_ecm_queued;
+	uint32_t        old_ecm_config_hash;
 	struct          s_module ph;
 	const struct    s_cardreader *crdr;
 	void            *crdr_data;                     // Private card reader data

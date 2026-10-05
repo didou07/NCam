@@ -49,6 +49,8 @@ void cardreader_reset(struct s_client *cl);
 int32_t cardreader_do_checkhealth(struct s_reader *reader);
 void cardreader_checkhealth(struct s_client *cl, struct s_reader *rdr);
 void cardreader_check_fastreset(struct s_client *cl, struct s_reader *rdr);
+void cardreader_check_old_ecm(struct s_client *cl, struct s_reader *rdr);
+int32_t cardreader_do_ecm(struct s_reader *reader, ECM_REQUEST *er, struct s_ecm_answer *ea);
 int32_t cardreader_do_emm(struct s_reader *reader, EMM_PACKET *ep);
 #ifdef WITH_SENDCMD
 int32_t cardreader_do_rawcmd(struct s_reader *reader, CMD_PACKET *cp);

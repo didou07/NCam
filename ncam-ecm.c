@@ -2819,6 +2819,19 @@ int32_t write_ecm_answer(struct s_reader *reader, ECM_REQUEST *er, int8_t rc, ui
 			reader->ecmshealthtout = ((double) reader->ecmstout / (reader->ecmsok + reader->ecmsnok + reader->ecmstout)) * 100;
 		}
 
+		if(rc == E_FOUND && reader->old_ecm_enabled && reader->old_ecm_source == 0 && reader->crdr && !is_network_reader(reader) && reader->typ != R_EMU && reader->typ != R_CONSTCW && er->ecmlen > 0 && er->ecmlen <= MAX_ECM_SIZE)
+		{
+			if(!reader->old_ecm_valid)
+			{
+				memcpy(reader->old_ecm_data, er->ecm, er->ecmlen);
+				reader->old_ecm_len = er->ecmlen;
+				reader->old_ecm_valid = 1;
+				reader->old_ecm_last_run = time(NULL);
+			}
+			if(reader->old_ecm_trigger == 1 && reader->old_ecm_success_count < UINT32_MAX)
+				{ reader->old_ecm_success_count++; }
+		}
+
 		if(rc == E_FOUND && reader->resetcycle > 0)
 		{
 			reader->resetcounter++;

@@ -19,8 +19,14 @@
 ##TPLREADERPINCODE##
 ##TPLREADERCONFIGNANO##
 				<TR><TD><A>Reset after No. ECM:</A></TD><TD><input name="resetcycle" class="short" type="text" maxlength="5" value="##RESETCYCLE##"></TD></TR>
-				<TR><TD><A>Fast Reset Enabled:</A></TD><TD><input name="fastreset_enabled" type="hidden" value="0"><input name="fastreset_enabled" type="checkbox" value="1" ##FASTRESETENABLEDCHECKED##><label>Periodically force a card reset, for any reader type</label></TD></TR>
-				<TR><TD><A>Fast Reset Interval:</A></TD><TD><input name="fastreset_interval" class="short" type="text" maxlength="5" value="##FASTRESETINTERVAL##"> seconds (default: 60)</TD></TR>
+				<TR><TD><A>Fast Reset Enabled:</A></TD><TD><input name="fastreset_enabled" type="hidden" value="0"><input id="fastresetEnabled" name="fastreset_enabled" type="checkbox" value="1" ##FASTRESETENABLEDCHECKED## onchange="if(this.checked){document.getElementById('oldEcmEnabled').checked=false;}"></TD></TR>
+				<TR><TD><A>Fast Reset Interval:</A></TD><TD><input name="fastreset_interval" class="short" type="text" maxlength="5" value="##FASTRESETINTERVAL##"></TD></TR>
+				<TR><TD><A>Old ECM:</A></TD><TD><input name="old_ecm_enabled" type="hidden" value="0"><input id="oldEcmEnabled" name="old_ecm_enabled" type="checkbox" value="1" ##OLDECMENABLEDCHECKED## onchange="if(this.checked){document.getElementById('fastresetEnabled').checked=false;}"></TD></TR>
+				<TR><TD><A>Old ECM Source:</A></TD><TD><select name="old_ecm_source"><option value="0" ##OLDECMSOURCEAUTOSELECTED##>Auto</option><option value="1" ##OLDECMSOURCEMANUALSELECTED##>Manual</option></select></TD></TR>
+				<TR><TD><A>Old ECM Trigger:</A></TD><TD><select name="old_ecm_trigger"><option value="0" ##OLDECMTRIGGERINTERVALSELECTED##>Interval</option><option value="1" ##OLDECMTRIGGERSUCCESSESSELECTED##>ECM Successes</option></select></TD></TR>
+				<TR><TD><A>Old ECM Interval:</A></TD><TD><input name="old_ecm_interval" class="short" type="text" maxlength="6" value="##OLDECMINTERVAL##"></TD></TR>
+				<TR><TD><A>Old ECM Successes:</A></TD><TD><input name="old_ecm_successes" class="short" type="text" maxlength="8" value="##OLDECMSUCCESSES##"></TD></TR>
+				<TR><TD><A>Old ECM:</A></TD><TD><input name="old_ecm" class="long" type="text" maxlength="2048" value="##OLDECM##"></TD></TR>
 				<TR><TD><A>Deprecated:</A></TD><TD><input name="deprecated" type="hidden" value="0"><input name="deprecated" type="checkbox" value="1" ##DEPRECATEDCHECKED##><label></label></TD></TR>
 ##TPLREADERCONFIGCRYPTOWORKS##
 ##TPLREADERCONFIGNAGRA##

@@ -300,6 +300,22 @@ void *work_thread(void *ptr)
 					reader_get_ecm(reader, data->ptr);
 					break;
 
+				case ACTION_READER_OLD_ECM:
+					{
+						ECM_REQUEST *er = data->ptr;
+						struct s_ecm_answer ea;
+						int32_t rc = ERROR;
+						memset(&ea, 0, sizeof(ea));
+						if(er && reader->old_ecm_enabled && reader->old_ecm_queued && reader->card_status == CARD_INSERTED
+							&& reader->csystem_active && reader->csystem && !strcasecmp(reader->csystem->desc, "conax"))
+						{
+							rc = cardreader_do_ecm(reader, er, &ea);
+						}
+						rdr_log(reader, "Old ECM %s (len %d)", rc == OK ? "OK" : "failed", er ? er->ecmlen : 0);
+						reader->old_ecm_queued = 0;
+					}
+					break;
+
 				case ACTION_READER_EMM:
 					reader_do_emm(reader, data->ptr);
 					break;

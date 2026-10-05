@@ -2561,6 +2561,14 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 	// Fast Reset (generic, any physical reader type - see cardreader_check_fastreset())
 	tpl_addVar(vars, TPLADD, "FASTRESETENABLEDCHECKED", (rdr->fastreset_enabled == 1) ? "checked" : "");
 	tpl_printf(vars, TPLADD, "FASTRESETINTERVAL", "%d", rdr->fastreset_interval);
+	tpl_addVar(vars, TPLADD, "OLDECMENABLEDCHECKED", (rdr->old_ecm_enabled == 1) ? "checked" : "");
+	tpl_addVar(vars, TPLADD, "OLDECMSOURCEAUTOSELECTED", (rdr->old_ecm_source == 0) ? "selected" : "");
+	tpl_addVar(vars, TPLADD, "OLDECMSOURCEMANUALSELECTED", (rdr->old_ecm_source == 1) ? "selected" : "");
+	tpl_addVar(vars, TPLADD, "OLDECMTRIGGERINTERVALSELECTED", (rdr->old_ecm_trigger == 0) ? "selected" : "");
+	tpl_addVar(vars, TPLADD, "OLDECMTRIGGERSUCCESSESSELECTED", (rdr->old_ecm_trigger == 1) ? "selected" : "");
+	tpl_printf(vars, TPLADD, "OLDECMINTERVAL", "%d", rdr->old_ecm_interval);
+	tpl_printf(vars, TPLADD, "OLDECMSUCCESSES", "%d", rdr->old_ecm_successes);
+	tpl_addVar(vars, TPLADD, "OLDECM", rdr->old_ecm);
 
 	// Auto Restart after
 	tpl_printf(vars, TPLADD, "AUTORESTARTSECONDS", "%d", rdr->autorestartseconds);

@@ -20,6 +20,36 @@
 extern const struct s_cardsystem *cardsystems[];
 extern char *RDR_CD_TXT[];
 
+static bool reader_old_ecm_physical(const struct s_reader *rdr)
+{
+	return rdr && rdr->crdr && !is_network_reader(rdr) && rdr->typ != R_EMU && rdr->typ != R_CONSTCW;
+}
+
+static uint32_t reader_old_ecm_hash(const char *text)
+{
+	uint32_t h = 2166136261u;
+	if(text)
+	{
+		for(const unsigned char *p = (const unsigned char *)text; *p; ++p)
+		{
+			h ^= *p;
+			h *= 16777619u;
+		}
+	}
+	return h;
+}
+
+static void reader_old_ecm_clear_runtime(struct s_reader *rdr)
+{
+	if(!rdr) { return; }
+	rdr->old_ecm_valid = 0;
+	rdr->old_ecm_len = 0;
+	rdr->old_ecm_success_count = 0;
+	rdr->old_ecm_last_run = 0;
+	rdr->old_ecm_queued = 0;
+	memset(rdr->old_ecm_data, 0, sizeof(rdr->old_ecm_data));
+}
+
 int32_t check_sct_len(const uint8_t *data, int32_t off, int32_t maxSize)
 {
 	int32_t len = SCT_LEN(data);
@@ -33,6 +63,7 @@ int32_t check_sct_len(const uint8_t *data, int32_t off, int32_t maxSize)
 
 static void reader_nullcard(struct s_reader *reader)
 {
+	reader_old_ecm_clear_runtime(reader);
 	reader->csystem_active = false;
 	reader->csystem = NULL;
 	memset(reader->hexserial, 0, sizeof(reader->hexserial));
@@ -347,7 +378,7 @@ void cardreader_checkhealth(struct s_client *cl, struct s_reader *rdr)
  */
 void cardreader_check_fastreset(struct s_client *cl, struct s_reader *rdr)
 {
-	if(!rdr || !rdr->enable || !rdr->active || !rdr->fastreset_enabled)
+	if(!rdr || !rdr->enable || !rdr->active || !rdr->fastreset_enabled || rdr->old_ecm_enabled)
 		{ return; }
 
 	if(rdr->fastreset_interval <= 0)
@@ -360,6 +391,77 @@ void cardreader_check_fastreset(struct s_client *cl, struct s_reader *rdr)
 	rdr_log(rdr, "Fast-reset triggered (interval: %ds)", rdr->fastreset_interval);
 	add_job(cl, ACTION_READER_RESET_FAST, NULL, 0);
 	rdr->fastreset_next = now + rdr->fastreset_interval;
+}
+
+static int reader_old_ecm_hex_to_bin(const char *hex, uint8_t *out, size_t cap, size_t *out_len)
+{
+	size_t len;
+	if(!hex || !out || !out_len) { return -1; }
+	len = cs_strlen(hex);
+	if(len < 2 || (len & 1u) || len / 2u > cap) { return -1; }
+	if(key_atob_l((char *)hex, out, (int32_t)len)) { return -1; }
+	*out_len = len / 2u;
+	return 0;
+}
+
+static bool reader_old_ecm_due(const struct s_reader *rdr, time_t now)
+{
+	if(!rdr->old_ecm_valid || rdr->old_ecm_queued) { return false; }
+	if(rdr->old_ecm_trigger == 1)
+		{ return rdr->old_ecm_successes > 0 && rdr->old_ecm_success_count >= (uint32_t)rdr->old_ecm_successes; }
+	if(rdr->old_ecm_interval <= 0 || rdr->old_ecm_last_run <= 0) { return false; }
+	return now - rdr->old_ecm_last_run >= (time_t)rdr->old_ecm_interval;
+}
+
+void cardreader_check_old_ecm(struct s_client *cl, struct s_reader *rdr)
+{
+	if(!cl || !rdr || !rdr->enable || !rdr->active || !reader_old_ecm_physical(rdr) || !rdr->old_ecm_enabled)
+		{ return; }
+	if(!rdr->csystem_active || !rdr->csystem || strcasecmp(rdr->csystem->desc, "conax") != 0 || rdr->card_status != CARD_INSERTED)
+		{ return; }
+
+	uint32_t config_hash = reader_old_ecm_hash(rdr->old_ecm);
+	config_hash ^= (uint32_t)rdr->old_ecm_source * 0x9E3779B9u;
+	config_hash ^= (uint32_t)rdr->old_ecm_trigger * 0x85EBCA6Bu;
+	config_hash ^= (uint32_t)rdr->old_ecm_interval * 0xC2B2AE35u;
+	config_hash ^= (uint32_t)rdr->old_ecm_successes * 0x27D4EB2Fu;
+	if(rdr->old_ecm_config_hash != config_hash)
+	{
+		reader_old_ecm_clear_runtime(rdr);
+		rdr->old_ecm_config_hash = config_hash;
+	}
+
+	if(!rdr->old_ecm_valid && rdr->old_ecm_source == 1)
+	{
+		size_t len = 0;
+		if(reader_old_ecm_hex_to_bin(rdr->old_ecm, rdr->old_ecm_data, sizeof(rdr->old_ecm_data), &len) == 0)
+		{
+			int32_t section_len = check_sct_len(rdr->old_ecm_data, 0, (int32_t)len);
+			if(section_len == (int32_t)len)
+			{
+				rdr->old_ecm_len = (uint16_t)len;
+				rdr->old_ecm_valid = 1;
+				rdr->old_ecm_last_run = time(NULL);
+			}
+		}
+	}
+
+	if(!reader_old_ecm_due(rdr, time(NULL))) { return; }
+
+	ECM_REQUEST *er = NULL;
+	if(!cs_malloc(&er, sizeof(*er))) { return; }
+	memset(er, 0, sizeof(*er));
+	memcpy(er->ecm, rdr->old_ecm_data, rdr->old_ecm_len);
+	er->ecmlen = rdr->old_ecm_len;
+	er->caid = rdr->caid;
+	er->client = cl;
+	rdr->old_ecm_last_run = time(NULL);
+	rdr->old_ecm_success_count = 0;
+	rdr->old_ecm_queued = 1;
+	if(!add_job(cl, ACTION_READER_OLD_ECM, er, sizeof(*er)))
+	{
+		rdr->old_ecm_queued = 0;
+	}
 }
 
 void cardreader_reset(struct s_client *cl)
