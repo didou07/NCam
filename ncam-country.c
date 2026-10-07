@@ -16,15 +16,12 @@
 #if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__CYGWIN__)
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
-#include <fcntl.h>
-#include <errno.h>
 #include <unistd.h>
 #endif
 
 #define NCAM_COUNTRY_MAX_CODES 256
 #define NCAM_COUNTRY_DBIP_DEFAULT "dbip-country-lite.mmdb"
-#define NCAM_COUNTRY_DBIP_MAX_COMPRESSED (16U * 1024U * 1024U)
+#define NCAM_COUNTRY_DBIP_MIRROR "https://dbip.mirror.framasoft.org/files/dbip-country-lite-latest.mmdb"
 #define NCAM_COUNTRY_DBIP_MAX_DATABASE (32U * 1024U * 1024U)
 
 typedef struct
@@ -141,22 +138,6 @@ const char *ncam_country_name(const char *code)
 	return name ? name : "Unknown";
 }
 
-void ncam_country_flag(const char *code, char *out, size_t outlen)
-{
-	if(!out || outlen == 0)
-		return;
-	out[0] = '\0';
-	if(!country_code_valid(code))
-		return;
-	if(outlen < 9)
-	{
-		snprintf(out, outlen, "%s", code);
-		return;
-	}
-	unsigned char flag[9] = {0xF0, 0x9F, 0x87, (unsigned char)(0xA6 + (code[0] - 'A')), 0xF0, 0x9F, 0x87, (unsigned char)(0xA6 + (code[1] - 'A')), 0};
-	memcpy(out, flag, sizeof(flag));
-}
-
 static bool country_local_or_private(IN_ADDR_T ip)
 {
 #ifdef IPV6SUPPORT
@@ -243,52 +224,34 @@ static bool country_load_locked(void)
 }
 
 
-#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__CYGWIN__)
-static bool country_run_program(const char *program, char *const argv[], const char *stdout_path)
+#ifdef WITH_LIBCURL
+static pthread_mutex_t country_download_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool country_curl_initialized = false;
+static pthread_mutex_t country_curl_init_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool country_curl_init_once(void)
 {
-	pid_t pid = fork();
-	if(pid < 0)
+	bool ok = true;
+	if(pthread_mutex_lock(&country_curl_init_lock) != 0)
 		return false;
-	if(pid == 0)
+	if(!country_curl_initialized)
 	{
-		int nullfd = open("/dev/null", O_WRONLY);
-		if(nullfd >= 0)
-		{
-			dup2(nullfd, STDERR_FILENO);
-			if(nullfd != STDERR_FILENO)
-				close(nullfd);
-		}
-		if(stdout_path)
-		{
-			int outfd = open(stdout_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-			if(outfd < 0)
-				_exit(126);
-			if(dup2(outfd, STDOUT_FILENO) < 0)
-				_exit(126);
-			if(outfd != STDOUT_FILENO)
-				close(outfd);
-		}
-		execv(program, argv);
-		_exit(127);
+		ok = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+		if(ok)
+			country_curl_initialized = true;
 	}
-	int status = 0;
-	while(waitpid(pid, &status, 0) < 0)
-	{
-		if(errno != EINTR)
-			return false;
-	}
-	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+	pthread_mutex_unlock(&country_curl_init_lock);
+	return ok;
 }
 
-#ifdef WITH_LIBCURL
 static size_t country_curl_write_file(void *ptr, size_t size, size_t nmemb, void *userdata)
 {
 	FILE *fp = (FILE *)userdata;
-	if(!fp || !ptr || size == 0 || nmemb == 0)
+	if(!fp || !ptr || size == 0 || nmemb == 0 || nmemb > SIZE_MAX / size)
 		return 0;
 	size_t bytes = size * nmemb;
 	long pos = ftell(fp);
-	if(pos < 0 || (uint64_t)pos + (uint64_t)bytes > NCAM_COUNTRY_DBIP_MAX_COMPRESSED)
+	if(pos < 0 || (uint64_t)pos + (uint64_t)bytes > NCAM_COUNTRY_DBIP_MAX_DATABASE)
 		return 0;
 	return fwrite(ptr, 1, bytes, fp);
 }
@@ -299,41 +262,60 @@ static bool country_download_file(const char *url, const char *dest)
 #ifdef WITH_LIBCURL
 	if(!url || !*url || !dest || !*dest)
 		return false;
-	if(curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK)
+	if(!country_curl_init_once())
+	{
+		cs_log("GeoIP download failed: libcurl initialization failed");
 		return false;
+	}
+	if(pthread_mutex_lock(&country_download_lock) != 0)
+	{
+		cs_log("GeoIP download failed: download lock initialization failed");
+		return false;
+	}
 
 	FILE *fp = fopen(dest, "wb");
 	if(!fp)
+	{
+		pthread_mutex_unlock(&country_download_lock);
+		cs_log("GeoIP download failed: cannot create temporary file");
 		return false;
+	}
 
 	CURL *curl_handle = curl_easy_init();
 	if(!curl_handle)
 	{
 		fclose(fp);
+		unlink(dest);
+		pthread_mutex_unlock(&country_download_lock);
+		cs_log("GeoIP download failed: libcurl could not create a session");
 		return false;
 	}
 
 	char errbuf[CURL_ERROR_SIZE] = {0};
-	curl_easy_setopt(curl_handle, CURLOPT_URL, url);
-	curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, errbuf);
-	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, country_curl_write_file);
-	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, fp);
-	curl_easy_setopt(curl_handle, CURLOPT_FOLLOWLOCATION, 1L);
-	curl_easy_setopt(curl_handle, CURLOPT_FAILONERROR, 1L);
-	curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 20L);
-	curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 180L);
-	curl_easy_setopt(curl_handle, CURLOPT_MAXFILESIZE, (long)NCAM_COUNTRY_DBIP_MAX_COMPRESSED);
-	curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 1L);
-	curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, "NCam/GeoIP");
-	curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 1L);
-	curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 2L);
+	CURLcode opt_res = CURLE_OK;
+	#define COUNTRY_CURL_SETOPT(opt, value) do { opt_res = curl_easy_setopt(curl_handle, (opt), (value)); if(opt_res != CURLE_OK) goto country_curl_fail; } while(0)
+	COUNTRY_CURL_SETOPT(CURLOPT_URL, url);
+	COUNTRY_CURL_SETOPT(CURLOPT_ERRORBUFFER, errbuf);
+	COUNTRY_CURL_SETOPT(CURLOPT_WRITEFUNCTION, country_curl_write_file);
+	COUNTRY_CURL_SETOPT(CURLOPT_WRITEDATA, fp);
+	COUNTRY_CURL_SETOPT(CURLOPT_FOLLOWLOCATION, 1L);
+	COUNTRY_CURL_SETOPT(CURLOPT_FAILONERROR, 1L);
+	COUNTRY_CURL_SETOPT(CURLOPT_CONNECTTIMEOUT, 20L);
+	COUNTRY_CURL_SETOPT(CURLOPT_TIMEOUT, 180L);
+	COUNTRY_CURL_SETOPT(CURLOPT_MAXFILESIZE, (long)NCAM_COUNTRY_DBIP_MAX_DATABASE);
+	COUNTRY_CURL_SETOPT(CURLOPT_NOSIGNAL, 1L);
+	COUNTRY_CURL_SETOPT(CURLOPT_USERAGENT, "NCam/GeoIP");
+	COUNTRY_CURL_SETOPT(CURLOPT_SSL_VERIFYPEER, 0L);
+	COUNTRY_CURL_SETOPT(CURLOPT_SSL_VERIFYHOST, 0L);
+#undef COUNTRY_CURL_SETOPT
 
 	CURLcode res = curl_easy_perform(curl_handle);
 	long http_code = 0;
-	curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
+	if(res == CURLE_OK)
+		curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
 	curl_easy_cleanup(curl_handle);
 	bool close_ok = (fclose(fp) == 0);
-	curl_global_cleanup();
+	pthread_mutex_unlock(&country_download_lock);
 
 	if(res != CURLE_OK || !close_ok)
 	{
@@ -348,6 +330,17 @@ static bool country_download_file(const char *url, const char *dest)
 		return false;
 	}
 	return true;
+
+country_curl_fail:
+	{
+		const char *msg = curl_easy_strerror(opt_res);
+		curl_easy_cleanup(curl_handle);
+		fclose(fp);
+		unlink(dest);
+		pthread_mutex_unlock(&country_download_lock);
+		cs_log("GeoIP download setup failed: %s", msg ? msg : "unknown libcurl error");
+		return false;
+	}
 #else
 	(void)url;
 	(void)dest;
@@ -355,29 +348,6 @@ static bool country_download_file(const char *url, const char *dest)
 	return false;
 #endif
 }
-
-static bool country_decompress_file(const char *src, const char *dest)
-{
-	char *tool = find_in_path("gzip");
-	if(tool)
-	{
-		char *argv[] = {tool, "-dc", (char *)src, NULL};
-		bool ok = country_run_program(tool, argv, dest);
-		free(tool);
-		if(ok)
-			return true;
-	}
-	tool = find_in_path("busybox");
-	if(tool)
-	{
-		char *argv[] = {tool, "gzip", "-dc", (char *)src, NULL};
-		bool ok = country_run_program(tool, argv, dest);
-		free(tool);
-		return ok;
-	}
-	return false;
-}
-#endif
 
 int32_t ncam_country_download_db(char *out, size_t outlen)
 {
@@ -388,54 +358,41 @@ int32_t ncam_country_download_db(char *out, size_t outlen)
 #else
 	char target[512];
 	country_default_db_path(target, sizeof(target));
-	char gz_path[1024], mmdb_path[1024];
+	char mmdb_path[1024];
 	pid_t pid = getpid();
-	if(snprintf(gz_path, sizeof(gz_path), "%s.download.%ld.gz", target, (long)pid) >= (int)sizeof(gz_path) ||
-		snprintf(mmdb_path, sizeof(mmdb_path), "%s.download.%ld.mmdb", target, (long)pid) >= (int)sizeof(mmdb_path))
+	if(snprintf(mmdb_path, sizeof(mmdb_path), "%s.download.%ld.mmdb", target, (long)pid) >= (int)sizeof(mmdb_path))
 	{
 		if(out && outlen) snprintf(out, outlen, "GeoIP destination path is too long");
 		return 0;
 	}
-	unlink(gz_path);
 	unlink(mmdb_path);
 	bool downloaded = false;
-	char url[256];
+	char url[512];
 	time_t now = time(NULL);
 	struct tm tmv;
 	localtime_r(&now, &tmv);
-	for(int attempt = 0; attempt < 2 && !downloaded; attempt++)
+	for(int attempt = 0; attempt < 3 && !downloaded; attempt++)
 	{
 		int year = tmv.tm_year + 1900;
-		int month = tmv.tm_mon + 1 - attempt;
+		int month = tmv.tm_mon + 1 - (attempt - 1);
 		if(month <= 0) { month += 12; year--; }
-		snprintf(url, sizeof(url), "https://download.db-ip.com/free/dbip-country-lite-%04d-%02d.mmdb.gz", year, month);
-		downloaded = country_download_file(url, gz_path);
+		if(attempt == 0)
+			snprintf(url, sizeof(url), "%s", NCAM_COUNTRY_DBIP_MIRROR);
+		else
+			snprintf(url, sizeof(url), "https://dbip.mirror.framasoft.org/files/dbip-country-lite-%04d-%02d.mmdb", year, month);
+		downloaded = country_download_file(url, mmdb_path);
 	}
 	if(!downloaded)
 	{
-		unlink(gz_path);
-		if(out && outlen) snprintf(out, outlen, "DB-IP download failed; source is unreachable or unavailable");
+		unlink(mmdb_path);
+		if(out && outlen) snprintf(out, outlen, "DB-IP Country Lite download failed; source is unreachable or unavailable");
 		return 0;
 	}
 	struct stat st;
-	if(stat(gz_path, &st) != 0 || st.st_size <= 0 || (uint64_t)st.st_size > NCAM_COUNTRY_DBIP_MAX_COMPRESSED)
-	{
-		unlink(gz_path);
-		if(out && outlen) snprintf(out, outlen, "DB-IP download size is invalid");
-		return 0;
-	}
-	if(!country_decompress_file(gz_path, mmdb_path))
-	{
-		unlink(gz_path);
-		unlink(mmdb_path);
-		if(out && outlen) snprintf(out, outlen, "Unable to decompress DB-IP database; gzip or busybox is required");
-		return 0;
-	}
-	unlink(gz_path);
 	if(stat(mmdb_path, &st) != 0 || st.st_size <= 0 || (uint64_t)st.st_size > NCAM_COUNTRY_DBIP_MAX_DATABASE)
 	{
 		unlink(mmdb_path);
-		if(out && outlen) snprintf(out, outlen, "DB-IP database size is invalid after decompression");
+		if(out && outlen) snprintf(out, outlen, "DB-IP database size is invalid");
 		return 0;
 	}
 	if(!country_state.initialized) ncam_country_init();
@@ -463,7 +420,6 @@ int32_t ncam_country_download_db(char *out, size_t outlen)
 	return 1;
 #endif
 }
-
 void ncam_country_init(void)
 {
 	if(!country_state.lock_ready)
@@ -511,8 +467,7 @@ int32_t ncam_country_lookup(IN_ADDR_T ip, char code[NCAM_COUNTRY_CODE_STR_LEN])
 	memcpy(address, ip.s6_addr, sizeof(address));
 	bool is_ipv6 = true;
 #else
-	uint32_t v = htonl(ip);
-	memcpy(address + 12, &v, sizeof(v));
+	memcpy(address + 12, &ip, sizeof(ip));
 	bool is_ipv6 = false;
 #endif
 	uint32_t data_offset = 0;

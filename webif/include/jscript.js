@@ -521,8 +521,17 @@ function is_nopoll(value) {
 function countryFlag(code) {
 	if (!code || code.length !== 2 || code === '--' || code === '??') return '';
 	code = code.toUpperCase();
-	if (code < 'AA' || code > 'ZZ') return '';
+	if (!/^[A-Z]{2}$/.test(code)) return '';
 	return String.fromCodePoint(code.charCodeAt(0) + 127397, code.charCodeAt(1) + 127397);
+}
+
+function renderCountryFlags(root) {
+	var scope = root || document;
+	$(scope).find('.country_flag[data-country]').each(function () {
+		var $flag = $(this);
+		var code = ($flag.attr('data-country') || '').toUpperCase();
+		$flag.text(countryFlag(code));
+	});
 }
 
 function updateUserpage(data) {
@@ -559,7 +568,7 @@ function updateUserpage(data) {
 					.html("<B>" + item.user.status + "</B><br>" + item.user.ip);
 			}
 			if (!is_nopoll('usercol26')) {
-				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr('title', item.user.countryname || '').text(countryFlag(item.user.country)));
+				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr({'data-country': item.user.country || '', 'title': item.user.countryname || ''}).text(countryFlag(item.user.country)));
 			}
 
 			if (!is_nopoll('usercol3')) {
@@ -702,7 +711,7 @@ function updateUserpage(data) {
 					.html("<B>" + item.user.status + "</B><br>" + item.user.ip);
 			}
 			if (!is_nopoll('usercol26')) {
-				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr('title', item.user.countryname || '').text(countryFlag(item.user.country)));
+				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr({'data-country': item.user.country || '', 'title': item.user.countryname || ''}).text(countryFlag(item.user.country)));
 			}
 
 			if (!is_nopoll('usercol3')) {
@@ -1355,7 +1364,7 @@ function updateStatuspage(data) {
 		}
 		if (!is_nopoll('statuscol17')) {
 			var countryCode = (typeof item.connection.country === 'string' && item.connection.country.length === 2 && item.connection.country !== '??' && item.connection.country !== '--') ? item.connection.country.toUpperCase() : '';
-			$(uid + " > td.statuscol17").empty().append($('<span class="country_flag">').attr('title', item.connection.countryname || '').text(countryFlag(countryCode)));
+			$(uid + " > td.statuscol17").empty().append($('<span class="country_flag">').attr({'data-country': countryCode, 'title': item.connection.countryname || ''}).text(countryFlag(countryCode)));
 		}
 		if (!is_nopoll('statuscol8')) {
 			$(uid + " > td.statuscol8").text(item.connection.port);
@@ -1728,6 +1737,8 @@ var nostorage = 0;
  * General: Start Polling
  */
 $(document).ready(function () {
+
+	renderCountryFlags(document);
 
 	try {
 		if (!localStorage) {

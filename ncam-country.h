@@ -11,7 +11,6 @@ void ncam_country_reload(void);
 int32_t ncam_country_access_allowed(IN_ADDR_T ip);
 int32_t ncam_country_lookup(IN_ADDR_T ip, char code[NCAM_COUNTRY_CODE_STR_LEN]);
 const char *ncam_country_name(const char *code);
-void ncam_country_flag(const char *code, char *out, size_t outlen);
 void ncam_country_status(char *out, size_t outlen);
 int32_t ncam_country_download_db(char *out, size_t outlen);
 

@@ -66,16 +66,13 @@ static void webif_add_client_proto(struct templatevars *vars, struct s_client *c
 static void webif_set_client_country(struct templatevars *vars, IN_ADDR_T ip, int ip_set)
 {
 	char code[NCAM_COUNTRY_CODE_STR_LEN] = "--";
-	char flag[16] = "";
 	const char *name = "Unknown";
 	if(ip_set && ncam_country_lookup(ip, code))
 	{
 		name = ncam_country_name(code);
-		ncam_country_flag(code, flag, sizeof(flag));
 	}
 	tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYCODE", code);
 	tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYNAME", name);
-	tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYFLAG", flag);
 }
 
 
@@ -4879,7 +4876,6 @@ static char *send_ncam_user_config(struct templatevars *vars, struct uriparams *
 		tpl_addVar(vars, TPLADD, "CLIENTPORT", "");
 		tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYCODE", "--");
 		tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYNAME", "Unknown");
-		tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYFLAG", "");
 		tpl_addVar(vars, TPLADD, "LASTCHANNELTITLE", "");
 		tpl_addVar(vars, TPLADD, "LASTCHANNELSORT", "");
 		tpl_addVar(vars, TPLADD, "CLIENTTIMEONCHANNELAPI", "");
@@ -6089,8 +6085,7 @@ static char *send_ncam_status(struct templatevars * vars, struct uriparams * par
 			tpl_addVar(vars, TPLADD, "ENTITLEMENTS", "");
 			tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYCODE", "--");
 			tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYNAME", "Unknown");
-			tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYFLAG", "");
-
+	
 			if(cl->typ == 'c')
 				{ user_count_all++; }
 			else if(cl->typ == 'p')
@@ -8046,14 +8041,12 @@ static char *send_ncam_failban(struct templatevars * vars, struct uriparams * pa
 	while((v_ban_entry = ll_iter_next(&itr)))
 	{
 		char country_code[NCAM_COUNTRY_CODE_STR_LEN];
-		char country_flag[16];
 		if(!ncam_country_lookup(v_ban_entry->v_ip, country_code))
 		{
 			cs_strncpy(country_code, "--", sizeof(country_code));
 		}
-		ncam_country_flag(country_code, country_flag, sizeof(country_flag));
 		tpl_addVar(vars, TPLADD, "COUNTRYNAME", ncam_country_name(country_code));
-		tpl_addVar(vars, TPLADD, "COUNTRYFLAG", country_flag);
+		tpl_addVar(vars, TPLADD, "COUNTRYCODE", country_code);
 		if(v_ban_entry->v_port)
 			tpl_printf(vars, TPLADD, "IPADDRESS", "%s@%d", cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port);
 		else
