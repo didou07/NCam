@@ -32,10 +32,13 @@ char *get_tmp_dir(void)
 
 	if(!d || !d[0])
 	{
-		getcwd(cs_tmpdir, sizeof(cs_tmpdir) - 1);
+		if(!getcwd(cs_tmpdir, sizeof(cs_tmpdir) - 1))
+			{ cs_strncpy(cs_tmpdir, ".", sizeof(cs_tmpdir)); }
 	}
-
-	cs_strncpy(cs_tmpdir, d, sizeof(cs_tmpdir));
+	else
+	{
+		cs_strncpy(cs_tmpdir, d, sizeof(cs_tmpdir));
+	}
 	char *p = cs_tmpdir;
 	while(*p) { p++; }
 	p--;

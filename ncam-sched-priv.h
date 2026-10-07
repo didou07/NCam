@@ -95,6 +95,7 @@ typedef struct {
     // State management
     job_state_t state;             // Current state in job lifecycle
     pthread_t thread;              // Worker thread handle
+    int thread_started;             // Worker has been created and must be joined
     volatile int is_running;       // Thread-safe execution flag
 } job_t;
 

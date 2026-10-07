@@ -33,6 +33,8 @@
 },
 "connection": {
     "ip": "##CLIENTIP##",
+    "country": "##CLIENTCOUNTRYCODE##",
+    "countryname": "##CLIENTCOUNTRYNAME##",
     "port": "##CLIENTPORT##",
     "status":"##CLIENTCON##",
     "totentitlements":"##TOTENTITLEMENTS##",

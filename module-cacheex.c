@@ -59,9 +59,13 @@ static pthread_rwlock_t hitcache_lock;
 static hash_table ht_hitcache;
 static list ll_hitcache;
 static bool cacheex_running;
+static pthread_t chkcache_thread;
+static bool chkcache_thread_started;
 
 void cacheex_init_hitcache(void)
 {
+	chkcache_thread = 0;
+	chkcache_thread_started = false;
 	init_hash_table(&ht_hitcache, &ll_hitcache);
 	if (pthread_rwlock_init(&hitcache_lock,NULL) != 0)
 		cs_log("Error creating lock hitcache_lock!");
@@ -71,6 +75,12 @@ void cacheex_init_hitcache(void)
 void cacheex_free_hitcache(void)
 {
 	cacheex_running = false;
+	if(chkcache_thread_started)
+	{
+		SAFE_THREAD_JOIN(chkcache_thread, NULL);
+		chkcache_thread = 0;
+		chkcache_thread_started = false;
+	}
 	cacheex_cleanup_hitcache(true);
 	deinitialize_hash_table(&ht_hitcache);
 	pthread_rwlock_destroy(&hitcache_lock);
@@ -181,19 +191,20 @@ static void cacheex_del_hitcache(struct s_client *cl, ECM_REQUEST *er)
 	search.prid = er->prid;
 	search.srvid = er->srvid;
 
-	if(cl && cl->grp)
-		{
-			result = find_hash_table(&ht_hitcache, &search, sizeof(HIT_KEY), &cacheex_compare_hitkey);
-			while(result)
-			{
-				result->grp &= ~cl->grp;
-				result->grp_last_max_hitcache_time &= ~cl->grp;
-				result = find_hash_table(&ht_hitcache, &search, sizeof(HIT_KEY), &cacheex_compare_hitkey);
-			}
-		}
-
 	SAFE_RWLOCK_WRLOCK(&hitcache_lock);
-	search_remove_elem_hash_table(&ht_hitcache, &search, sizeof(HIT_KEY), &cacheex_compare_hitkey);
+	result = find_hash_table(&ht_hitcache, &search, sizeof(HIT_KEY), &cacheex_compare_hitkey);
+	if(result)
+	{
+		if(cl && cl->grp)
+		{
+			result->grp &= ~cl->grp;
+			result->grp_last_max_hitcache_time &= ~cl->grp;
+		}
+		if(!cl || !cl->grp || !result->grp)
+		{
+			search_remove_elem_hash_table(&ht_hitcache, &search, sizeof(HIT_KEY), &cacheex_compare_hitkey);
+		}
+	}
 	SAFE_RWLOCK_UNLOCK(&hitcache_lock);
 }
 
@@ -400,7 +411,11 @@ static void *chkcache_process(void)
 
 void checkcache_process_thread_start(void)
 {
-	start_thread("chkcache_process", (void *)&chkcache_process, NULL, NULL, 1, 1);
+	if(chkcache_thread_started)
+		{ return; }
+	int32_t ret = start_thread("chkcache_process", (void *)&chkcache_process, NULL, &chkcache_thread, 0, 1);
+	if(ret == 0)
+		{ chkcache_thread_started = true; }
 }
 
 void cacheex_init(void)
@@ -1303,30 +1318,6 @@ void cacheex_push_out(struct s_client *cl, ECM_REQUEST *er)
 		first_client->cwcacheexpushlg++;
 	}
 #endif
-}
-
-bool cacheex_check_queue_length(struct s_client *cl)
-{
-	// Avoid full running queues:
-	if(ll_count(cl->joblist) <= 2000)
-		return 0;
-
-	cs_log_dbg(D_TRACE, "WARNING: job queue %s %s has more than 2000 jobs! count=%d, dropped!",
-					cl->typ == 'c' ? "client" : "reader", username(cl), ll_count(cl->joblist));
-
-	// Thread down???
-	SAFE_MUTEX_LOCK(&cl->thread_lock);
-	if(cl && !cl->kill && cl->thread && cl->thread_active)
-	{
-		// Just test for invalid thread id:
-		if(pthread_detach(cl->thread) == ESRCH)
-		{
-			cl->thread_active = 0;
-			cs_log_dbg(D_TRACE, "WARNING: %s %s thread died!", cl->typ == 'c' ? "client" : "reader", username(cl));
-		}
-	}
-	SAFE_MUTEX_UNLOCK(&cl->thread_lock);
-	return 1;
 }
 
 void cacheex_mode1_delay(ECM_REQUEST *er)

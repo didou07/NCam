@@ -39,15 +39,22 @@ static uint32_t reader_old_ecm_hash(const char *text)
 	return h;
 }
 
-static void reader_old_ecm_clear_runtime(struct s_reader *rdr)
+static void reader_old_ecm_clear_runtime_nolock(struct s_reader *rdr)
 {
 	if(!rdr) { return; }
 	rdr->old_ecm_valid = 0;
 	rdr->old_ecm_len = 0;
 	rdr->old_ecm_success_count = 0;
-	rdr->old_ecm_last_run = 0;
 	rdr->old_ecm_queued = 0;
 	memset(rdr->old_ecm_data, 0, sizeof(rdr->old_ecm_data));
+}
+
+static void reader_old_ecm_clear_runtime(struct s_reader *rdr)
+{
+	if(!rdr) { return; }
+	if(rdr->client) { SAFE_MUTEX_LOCK(&rdr->client->thread_lock); }
+	reader_old_ecm_clear_runtime_nolock(rdr);
+	if(rdr->client) { SAFE_MUTEX_UNLOCK(&rdr->client->thread_lock); }
 }
 
 int32_t check_sct_len(const uint8_t *data, int32_t off, int32_t maxSize)
@@ -404,13 +411,10 @@ static int reader_old_ecm_hex_to_bin(const char *hex, uint8_t *out, size_t cap, 
 	return 0;
 }
 
-static bool reader_old_ecm_due(const struct s_reader *rdr, time_t now)
+static bool reader_old_ecm_due(const struct s_reader *rdr)
 {
 	if(!rdr->old_ecm_valid || rdr->old_ecm_queued) { return false; }
-	if(rdr->old_ecm_trigger == 1)
-		{ return rdr->old_ecm_successes > 0 && rdr->old_ecm_success_count >= (uint32_t)rdr->old_ecm_successes; }
-	if(rdr->old_ecm_interval <= 0 || rdr->old_ecm_last_run <= 0) { return false; }
-	return now - rdr->old_ecm_last_run >= (time_t)rdr->old_ecm_interval;
+	return rdr->old_ecm_successes > 0 && rdr->old_ecm_success_count >= (uint32_t)rdr->old_ecm_successes;
 }
 
 void cardreader_check_old_ecm(struct s_client *cl, struct s_reader *rdr)
@@ -422,12 +426,13 @@ void cardreader_check_old_ecm(struct s_client *cl, struct s_reader *rdr)
 
 	uint32_t config_hash = reader_old_ecm_hash(rdr->old_ecm);
 	config_hash ^= (uint32_t)rdr->old_ecm_source * 0x9E3779B9u;
-	config_hash ^= (uint32_t)rdr->old_ecm_trigger * 0x85EBCA6Bu;
-	config_hash ^= (uint32_t)rdr->old_ecm_interval * 0xC2B2AE35u;
 	config_hash ^= (uint32_t)rdr->old_ecm_successes * 0x27D4EB2Fu;
+
+	ECM_REQUEST *er = NULL;
+	SAFE_MUTEX_LOCK(&cl->thread_lock);
 	if(rdr->old_ecm_config_hash != config_hash)
 	{
-		reader_old_ecm_clear_runtime(rdr);
+		reader_old_ecm_clear_runtime_nolock(rdr);
 		rdr->old_ecm_config_hash = config_hash;
 	}
 
@@ -441,26 +446,40 @@ void cardreader_check_old_ecm(struct s_client *cl, struct s_reader *rdr)
 			{
 				rdr->old_ecm_len = (uint16_t)len;
 				rdr->old_ecm_valid = 1;
-				rdr->old_ecm_last_run = time(NULL);
 			}
 		}
 	}
 
-	if(!reader_old_ecm_due(rdr, time(NULL))) { return; }
+	if(!reader_old_ecm_due(rdr))
+	{
+		SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+		return;
+	}
 
-	ECM_REQUEST *er = NULL;
-	if(!cs_malloc(&er, sizeof(*er))) { return; }
+	if(!cs_malloc(&er, sizeof(*er)))
+	{
+		SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+		return;
+	}
 	memset(er, 0, sizeof(*er));
 	memcpy(er->ecm, rdr->old_ecm_data, rdr->old_ecm_len);
 	er->ecmlen = rdr->old_ecm_len;
 	er->caid = rdr->caid;
 	er->client = cl;
-	rdr->old_ecm_last_run = time(NULL);
-	rdr->old_ecm_success_count = 0;
 	rdr->old_ecm_queued = 1;
+	SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+
 	if(!add_job(cl, ACTION_READER_OLD_ECM, er, sizeof(*er)))
 	{
+		SAFE_MUTEX_LOCK(&cl->thread_lock);
 		rdr->old_ecm_queued = 0;
+		SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+	}
+	else
+	{
+		SAFE_MUTEX_LOCK(&cl->thread_lock);
+		rdr->old_ecm_success_count = 0;
+		SAFE_MUTEX_UNLOCK(&cl->thread_lock);
 	}
 }
 

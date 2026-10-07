@@ -1,9 +1,11 @@
 #define MODULE_LOG_PREFIX "work"
 
+#define MAX_JOBLIST_LENGTH 4096
+
 #include "globals.h"
-#include "module-cacheex.h"
 #include "ncam-client.h"
 #include "ncam-ecm.h"
+#include "module-cacheex.h"
 #include "ncam-emm.h"
 #include "ncam-lock.h"
 #include "ncam-net.h"
@@ -51,7 +53,10 @@ static void free_job_data(struct job_data *data)
 
 void free_joblist(struct s_client *cl)
 {
-	int32_t lock_status = pthread_mutex_trylock(&cl->thread_lock);
+	if(!cl)
+		{ return; }
+
+	SAFE_MUTEX_LOCK(&cl->thread_lock);
 	LL_ITER it = ll_iter_create(cl->joblist);
 
 	struct job_data *data;
@@ -63,14 +68,11 @@ void free_joblist(struct s_client *cl)
 	ll_destroy(&cl->joblist);
 	cl->account = NULL;
 
-	if(cl->work_job_data) // Free job_data that was not freed by work_thread
+	if(cl->work_job_data)
 		{ free_job_data(cl->work_job_data); }
 
 	cl->work_job_data = NULL;
-
-	if(lock_status == 0)
-		{ SAFE_MUTEX_UNLOCK(&cl->thread_lock); }
-
+	SAFE_MUTEX_UNLOCK(&cl->thread_lock);
 	pthread_mutex_destroy(&cl->thread_lock);
 }
 
@@ -115,7 +117,6 @@ void *work_thread(void *ptr)
 
 	SAFE_SETSPECIFIC(getclient, cl);
 	cl->thread = pthread_self();
-	cl->thread_active = 1;
 
 	set_work_thread_name(data);
 
@@ -126,7 +127,14 @@ void *work_thread(void *ptr)
 
 	uint8_t *mbuf;
 	if(!cs_malloc(&mbuf, bufsize))
-		{ return NULL; }
+	{
+		SAFE_MUTEX_LOCK(&cl->thread_lock);
+		cl->thread_active = 0;
+		cl->work_mbuf = NULL;
+		SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+		free_job_data(data);
+		return NULL;
+	}
 
 	cl->work_mbuf = mbuf; // Track locally allocated data, because some callback may call cs_exit/cs_disconect_client/pthread_exit and then mbuf would be leaked
 	int32_t n = 0, rc = 0, i, idx, s;
@@ -146,9 +154,17 @@ void *work_thread(void *ptr)
 				SAFE_MUTEX_UNLOCK(&cl->thread_lock);
 				cs_log_dbg(D_TRACE, "ending thread (kill)");
 				__free_job_data(cl, data);
-				cl->work_mbuf = NULL; // Prevent free_client from freeing mbuf (->work_mbuf)
+				cl->work_mbuf = NULL;
+				int8_t pending_restart = restart_reader ? 1 : 0;
+				if(reader)
+				{
+					cs_writelock(__func__, &system_lock);
+					pending_restart = (reader->restart_pending && reader->enable) ? 1 : pending_restart;
+					reader->restart_pending = 0;
+					cs_writeunlock(__func__, &system_lock);
+				}
 				free_client(cl);
-				if(restart_reader)
+				if(pending_restart)
 					{ restart_cardreader(reader, 0); }
 				NULLFREE(mbuf);
 				pthread_exit(NULL);
@@ -305,14 +321,20 @@ void *work_thread(void *ptr)
 						ECM_REQUEST *er = data->ptr;
 						struct s_ecm_answer ea;
 						int32_t rc = ERROR;
+						int8_t queued = 0;
 						memset(&ea, 0, sizeof(ea));
-						if(er && reader->old_ecm_enabled && reader->old_ecm_queued && reader->card_status == CARD_INSERTED
-							&& reader->csystem_active && reader->csystem && !strcasecmp(reader->csystem->desc, "conax"))
+						SAFE_MUTEX_LOCK(&cl->thread_lock);
+						queued = reader->old_ecm_queued;
+						SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+						if(er && reader->old_ecm_enabled && queued && reader->card_status == CARD_INSERTED
+								&& reader->csystem_active && reader->csystem && !strcasecmp(reader->csystem->desc, "conax"))
 						{
 							rc = cardreader_do_ecm(reader, er, &ea);
 						}
 						rdr_log(reader, "Old ECM %s (len %d)", rc == OK ? "OK" : "failed", er ? er->ecmlen : 0);
+						SAFE_MUTEX_LOCK(&cl->thread_lock);
 						reader->old_ecm_queued = 0;
+						SAFE_MUTEX_UNLOCK(&cl->thread_lock);
 					}
 					break;
 
@@ -505,6 +527,11 @@ void *work_thread(void *ptr)
 
 							struct cc_card **cardarray = get_sorted_card_copy(sharelist2, 0, &cardsize);
 							ll_destroy(&sharelist2);
+							if(!cardarray || cardsize <= 0)
+							{
+								NULLFREE(cardarray);
+								break;
+							}
 
 							for(ii = 0; ii < cardsize; ii++)
 							{
@@ -583,13 +610,13 @@ void *work_thread(void *ptr)
 		}
 		else
 		{
+			cl->work_mbuf = NULL;
 			cl->thread_active = 0;
 			SAFE_MUTEX_UNLOCK(&cl->thread_lock);
-			break;
+			NULLFREE(mbuf);
+			pthread_exit(NULL);
 		}
 	}
-	cl->thread_active = 0;
-	cl->work_mbuf = NULL; // Prevent free_client from freeing mbuf (->work_mbuf)
 	NULLFREE(mbuf);
 	pthread_exit(NULL);
 	return NULL;
@@ -611,12 +638,6 @@ int32_t add_job(struct s_client *cl, enum actions action, void *ptr, int32_t len
 		return 0;
 	}
 
-	if(action == ACTION_CACHE_PUSH_OUT && cacheex_check_queue_length(cl))
-	{
-		if(len && ptr)
-			{ NULLFREE(ptr); }
-		return 0;
-	}
 
 	struct job_data *data;
 	if(!cs_malloc(&data, sizeof(struct job_data)))
@@ -635,15 +656,66 @@ int32_t add_job(struct s_client *cl, enum actions action, void *ptr, int32_t len
 	SAFE_MUTEX_LOCK(&cl->thread_lock);
 	if(cl && !cl->kill && cl->thread_active)
 	{
+		if((action == ACTION_READER_IDLE || action == ACTION_READER_REMOTE || action == ACTION_READER_CARDINFO ||
+			action == ACTION_READER_RESET_FAST || action == ACTION_READER_CHECK_HEALTH || action == ACTION_READER_POLL_STATUS ||
+			action == ACTION_CLIENT_TCP || action == ACTION_CLIENT_IDLE || action == ACTION_PEER_IDLE) && cl->joblist)
+		{
+			LL_ITER it = ll_iter_create(cl->joblist);
+			struct job_data *queued;
+			while((queued = ll_iter_next(&it)))
+			{
+				if(queued->action == action)
+				{
+					SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+					if(len && ptr) { NULLFREE(ptr); }
+					return 1;
+				}
+			}
+		}
+
+		int32_t queue_count = cl->joblist ? ll_count(cl->joblist) : 0;
+#ifdef CS_CACHEEX
+		if(action == ACTION_CACHE_PUSH_OUT && queue_count >= 2000)
+		{
+			SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+			cs_log_dbg(D_TRACE, "WARNING: job queue %s %s reached 2000 jobs; dropping cache push",
+					cl->typ == 'c' ? "client" : "reader", username(cl));
+			if(len && ptr) { NULLFREE(ptr); }
+			return 0;
+		}
+#endif
+		if(queue_count >= MAX_JOBLIST_LENGTH)
+		{
+			SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+			cs_log_dbg(D_TRACE, "WARNING: job queue %s %s reached %d jobs; dropping action %d",
+					cl->typ == 'c' ? "client" : "reader", username(cl), MAX_JOBLIST_LENGTH, action);
+			if(len && ptr) { NULLFREE(ptr); }
+			return 0;
+		}
+
 		if(!cl->joblist)
-			{ cl->joblist = ll_create("joblist"); }
-		ll_append(cl->joblist, data);
+		{
+			cl->joblist = ll_create("joblist");
+			if(!cl->joblist)
+			{
+				SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+				if(len && ptr) { NULLFREE(ptr); }
+				return 0;
+			}
+		}
+		if(!ll_append(cl->joblist, data))
+		{
+			SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+			free_job_data(data);
+			return 0;
+		}
 		if(cl->thread_active == 2)
 			{ pthread_kill(cl->thread, NCAM_SIGNAL_WAKEUP); }
+		int32_t queue_len = ll_count(cl->joblist);
 		SAFE_MUTEX_UNLOCK(&cl->thread_lock);
 		cs_log_dbg(D_TRACE, "add %s job action %d queue length %d %s",
-					action > ACTION_CLIENT_FIRST ? "client" : "reader", action,
-					ll_count(cl->joblist), username(cl));
+				action > ACTION_CLIENT_FIRST ? "client" : "reader", action,
+				queue_len, username(cl));
 		return 1;
 	}
 
@@ -659,15 +731,18 @@ int32_t add_job(struct s_client *cl, enum actions action, void *ptr, int32_t len
 					action > ACTION_CLIENT_FIRST ? "client" : "reader", action);
 	}
 
+	cl->thread_active = 1;
 	int32_t ret = start_thread("client work", work_thread, (void *)data, &cl->thread, 1, modify_stacksize);
 	if(ret)
 	{
+		cl->thread_active = 0;
 		cs_log("ERROR: can't create thread for %s (errno=%d %s)",
-				action > ACTION_CLIENT_FIRST ? "client" : "reader", ret, strerror(ret));
+			action > ACTION_CLIENT_FIRST ? "client" : "reader", ret, strerror(ret));
 		free_job_data(data);
+		SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+		return 0;
 	}
 
-	cl->thread_active = 1;
 	SAFE_MUTEX_UNLOCK(&cl->thread_lock);
 	return 1;
 }

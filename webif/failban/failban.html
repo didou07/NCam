@@ -1,14 +1,40 @@
 ##TPLHEADER##
 ##TPLMENU##
 ##TPLMESSAGE##
-	<DIV ID="subnav">
-		<UL ID="nav">
-			<LI CLASS="configmenu"><A HREF="failban.html?action=delete&amp;intip=all" onclick="return confirm('Clear All Failban Entries ?')">Clear all</A></LI>
-		</UL>
-	</DIV>
+<DIV ID="subnav">
+	<UL ID="nav" CLASS="failban_tabs">
+		<LI CLASS="configmenu"><A HREF="#" onclick="return failbanTab('banned');">Banned</A></LI>
+		<LI CLASS="configmenu"><A HREF="#" onclick="return failbanTab('config');">Config</A></LI>
+		<LI CLASS="configmenu"><A HREF="failban.html?action=delete&amp;intip=all" onclick="return confirm('Clear All Failban Entries ?')">Clear all</A></LI>
+	</UL>
+</DIV>
+<DIV ID="failban_config_panel" style="display:none">
+	<FORM ACTION="failban.html" METHOD="POST">
+	<TABLE CLASS="config failban_access">
+		<TR><TH>Access control</TH></TR>
+		<TR><TD><A>Country access</A><BR><SELECT name="countryenabled"><OPTION value="0" ##COUNTRYACCESSOFF##>Off</OPTION><OPTION value="1" ##COUNTRYACCESSON##>On</OPTION></SELECT></TD></TR>
+		<TR><TD><A>Countries</A><BR><input name="allowedcountries" type="text" maxlength="800" value="##ACCESSALLOWEDCOUNTRIES##" placeholder="DZ,FR,DE"></TD></TR>
+		<TR><TD><A>IP exceptions</A><BR><input name="countryexceptions" type="text" maxlength="400" value="##ACCESSEXCEPTIONS##" placeholder="1.2.3.4,10.0.0.0-10.255.255.255"></TD></TR>
+		<TR><TD><A>GeoIP database</A><BR><span class="cfg_path">dbip-country-lite.mmdb</span> <button type="submit" name="action" value="geoipdownload">Update DB</button></TD></TR>
+		<TR><TD><A>Ban time</A><BR><input name="failbantime" class="short" type="text" maxlength="6" value="##FAILBANTIME##"> <span class="cfg_hint">min</span></TD></TR>
+		<TR><TD><A>Ban count</A><BR><input name="failbancount" class="short" type="text" maxlength="2" value="##FAILBANCOUNT##"> <span class="cfg_hint">tries</span></TD></TR>
+		<TR><TD><A>Status</A><BR><span class="country_status">##ACCESSSTATUS##</span></TD></TR>
+		<TR><TD class="centered"><button type="submit" name="action" value="accesssave">Save</button></TD></TR>
+	</TABLE>
+	</FORM>
+</DIV>
+<DIV ID="failban_list_panel">
 	<TABLE CLASS="failban">
-		<TR><TH COLSPAN="6">List of banned IP Addresses</TH></TR>
-		<TR><TH>User</TH><TH>IP Address</TH><TH>Violation date</TH><TH>Violation count</TH><TH>Left ban time</TH><TH>Action</TH></TR>
+		<TR><TH COLSPAN="7">List of banned IP Addresses</TH></TR>
+		<TR><TH>User</TH><TH>IP Address</TH><TH>Country</TH><TH>Violation date</TH><TH>Violation count</TH><TH>Left ban time</TH><TH>Action</TH></TR>
 ##FAILBANROW##
 	</TABLE>
+</DIV>
+<script type="text/javascript">
+function failbanTab(tab) {
+	document.getElementById("failban_config_panel").style.display = tab === "config" ? "" : "none";
+	document.getElementById("failban_list_panel").style.display = tab === "config" ? "none" : "";
+	return false;
+}
+</script>
 ##TPLFOOTER##

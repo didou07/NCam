@@ -213,8 +213,9 @@ static struct libusb_device *find_smartreader(struct s_reader *rdr, const char *
 {
 	rdr->smartdev_found = 0;
 	libusb_device *dev;
-	libusb_device_handle *usb_dev_handle;
-	libusb_device **devs;
+	libusb_device_handle *usb_dev_handle = NULL;
+	libusb_device **devs = NULL;
+	libusb_device *found = NULL;
 	ssize_t cnt;
 	int32_t i = 0;
 	int32_t ret;
@@ -231,84 +232,61 @@ static struct libusb_device *find_smartreader(struct s_reader *rdr, const char *
 		if(ret < 0)
 		{
 			rdr_log(rdr, "failed to get device descriptor for device %s on bus %s", dev_name, busname);
-			return NULL;
+			continue;
 		}
 
-		if(usbdesc.idVendor == 0x0403 && (usbdesc.idProduct == 0x6001 || usbdesc.idProduct == 0x6011))
+		if(usbdesc.idVendor != 0x0403 || (usbdesc.idProduct != 0x6001 && usbdesc.idProduct != 0x6011))
+			{ continue; }
+
+		ret = libusb_open(dev, &usb_dev_handle);
+		if(ret)
 		{
-			ret = libusb_open(dev, &usb_dev_handle);
-			if(ret)
-			{
-				rdr_log(rdr, "coulnd't open device %03d:%03d", libusb_get_bus_number(dev), libusb_get_device_address(dev));
-				switch(ret)
-				{
-				case LIBUSB_ERROR_NO_MEM:
-					rdr_log(rdr, "libusb_open error LIBUSB_ERROR_NO_MEM : memory allocation failure");
-					break;
-				case LIBUSB_ERROR_ACCESS:
-					rdr_log(rdr, "libusb_open error LIBUSB_ERROR_ACCESS : the user has insufficient permissions");
-					break;
-				case LIBUSB_ERROR_NO_DEVICE:
-					rdr_log(rdr, "libusb_open error LIBUSB_ERROR_NO_DEVICE : the device has been disconnected");
-					break;
-				default:
-					rdr_log(rdr, "libusb_open unknown error : %d", ret);
-					break;
-				}
-				continue;
-			}
-
-			// If the device is specified as "Serial:number", check iSerial
-			if(!strcasecmp(busname, "Serial"))
-			{
-				char iserialbuffer[128];
-				if(libusb_get_string_descriptor_ascii(usb_dev_handle, usbdesc.iSerialNumber, (unsigned char *)iserialbuffer, sizeof(iserialbuffer)) > 0)
-				{
-					if(!strcmp(trim(iserialbuffer), dev_name))
-					{
-						rdr_log_dbg(rdr, D_IFD, "Found reader with serial %s at %03d:%03d", dev_name, libusb_get_bus_number(dev), libusb_get_device_address(dev));
-						if(smartreader_check_endpoint(rdr, dev, in_endpoint, out_endpoint)) {
-							if(out_endpoint == 0x82 && in_endpoint == 0x01 && usbdesc.idProduct == 0x6001) { rdr->smart_type = 0; rdr->smartdev_found = 1;} else
-							if(out_endpoint == 0x81 && in_endpoint == 0x01) { rdr->smart_type = 1; rdr->smartdev_found = 2;} else
-							if(out_endpoint == 0x81 && in_endpoint == 0x02 && usbdesc.idProduct == 0x6001) { rdr->smart_type = 2; rdr->smartdev_found = 3;} else
-							if(out_endpoint == 0x81 && in_endpoint == 0x02 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 3; rdr->smartdev_found = 4; rdr->modemstat = 1;} else
-							if(out_endpoint == 0x83 && in_endpoint == 0x04 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 4; rdr->smartdev_found = 5; rdr->modemstat = 1;} else
-							if(out_endpoint == 0x85 && in_endpoint == 0x06 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 5; rdr->smartdev_found = 6; rdr->modemstat = 1;} else
-								rdr->smartdev_found = 0;
-						}
-					}
-				}
-			}
-			else if(libusb_get_bus_number(dev) == atoi(busname) && libusb_get_device_address(dev) == atoi(dev_name))
-			{
-				rdr_log_dbg(rdr, D_DEVICE, "SR: Checking FTDI device: %03d on bus %03d", libusb_get_device_address(dev), libusb_get_bus_number(dev));
-				// check for smargo endpoints.
-						if(smartreader_check_endpoint(rdr, dev, in_endpoint, out_endpoint)) {
-							if(out_endpoint == 0x82 && in_endpoint == 0x01 && usbdesc.idProduct == 0x6001) { rdr->smart_type = 0; rdr->smartdev_found = 1;} else
-							if(out_endpoint == 0x81 && in_endpoint == 0x01) { rdr->smart_type = 1; rdr->smartdev_found = 2;} else
-							if(out_endpoint == 0x81 && in_endpoint == 0x02 && usbdesc.idProduct == 0x6001) { rdr->smart_type = 2; rdr->smartdev_found = 3;} else
-							if(out_endpoint == 0x81 && in_endpoint == 0x02 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 3; rdr->smartdev_found = 4; rdr->modemstat = 1;} else
-							if(out_endpoint == 0x83 && in_endpoint == 0x04 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 4; rdr->smartdev_found = 5; rdr->modemstat = 1;} else
-							if(out_endpoint == 0x85 && in_endpoint == 0x06 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 5; rdr->smartdev_found = 6; rdr->modemstat = 1;} else
-								rdr->smartdev_found = 0;
-						}
-			}
-			libusb_close(usb_dev_handle);
+			rdr_log(rdr, "couldn't open device %03d:%03d (ret=%d)", libusb_get_bus_number(dev), libusb_get_device_address(dev), ret);
+			continue;
 		}
+
+		bool match = false;
+		if(!strcasecmp(busname, "Serial"))
+		{
+			char iserialbuffer[128] = { 0 };
+			if(libusb_get_string_descriptor_ascii(usb_dev_handle, usbdesc.iSerialNumber, (unsigned char *)iserialbuffer, sizeof(iserialbuffer)) > 0)
+				{ match = !strcmp(trim(iserialbuffer), dev_name); }
+		}
+		else
+		{
+			match = libusb_get_bus_number(dev) == atoi(busname) && libusb_get_device_address(dev) == atoi(dev_name);
+		}
+
+		if(match && smartreader_check_endpoint(rdr, dev, in_endpoint, out_endpoint))
+		{
+			if(out_endpoint == 0x82 && in_endpoint == 0x01 && usbdesc.idProduct == 0x6001) { rdr->smart_type = 0; rdr->smartdev_found = 1; }
+			else if(out_endpoint == 0x81 && in_endpoint == 0x01) { rdr->smart_type = 1; rdr->smartdev_found = 2; }
+			else if(out_endpoint == 0x81 && in_endpoint == 0x02 && usbdesc.idProduct == 0x6001) { rdr->smart_type = 2; rdr->smartdev_found = 3; }
+			else if(out_endpoint == 0x81 && in_endpoint == 0x02 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 3; rdr->smartdev_found = 4; rdr->modemstat = 1; }
+			else if(out_endpoint == 0x83 && in_endpoint == 0x04 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 4; rdr->smartdev_found = 5; rdr->modemstat = 1; }
+			else if(out_endpoint == 0x85 && in_endpoint == 0x06 && usbdesc.idProduct == 0x6011) { rdr->smart_type = 5; rdr->smartdev_found = 6; rdr->modemstat = 1; }
+		}
+
+		libusb_close(usb_dev_handle);
+		usb_dev_handle = NULL;
 
 		if(rdr->smartdev_found >= 1)
-			{ break; }
+		{
+			found = libusb_ref_device(dev);
+			break;
+		}
 	}
+
+	libusb_free_device_list(devs, 1);
 
 	if(!rdr->smartdev_found)
 	{
 		rdr_log(rdr, "Smartreader device %s:%s not found", busname, dev_name);
 		return NULL;
 	}
-	else
-		rdr_log_dbg(rdr, D_IFD, "Found smartreader device %s:%s", busname, dev_name);
 
-	return dev;
+	rdr_log_dbg(rdr, D_IFD, "Found smartreader device %s:%s", busname, dev_name);
+	return found;
 }
 
 void smartreader_init(struct s_reader *reader)
@@ -949,10 +927,12 @@ static void read_callback(struct libusb_transfer *transfer)
 			}
 		}
 
-		ret = libusb_submit_transfer(transfer);
-
-		if(ret != 0)
-			{ rdr_log(reader, "SR: submit async transfer failed with error %d", ret); }
+		if(crdr_data->running && !crdr_data->closing)
+		{
+			ret = libusb_submit_transfer(transfer);
+			if(ret != 0)
+				{ rdr_log(reader, "SR: submit async transfer failed with error %d", ret); }
+		}
 
 	}
 	else
@@ -1073,6 +1053,14 @@ static int32_t smartreader_usb_open_dev(struct s_reader *reader)
 	if(smartreader_usb_reset(reader) != 0)
 	{
 		libusb_release_interface(crdr_data->usb_dev_handle, crdr_data->interface);
+		for(int32_t i = 0; i < NUM_TXFERS; i++)
+		{
+			if(crdr_data->usbt[i])
+			{
+				libusb_free_transfer(crdr_data->usbt[i]);
+				crdr_data->usbt[i] = NULL;
+			}
+		}
 		smartreader_usb_close_internal(reader);
 		rdr_log(reader, "smartreader_usb_reset failed");
 		return (-6);
@@ -1231,20 +1219,24 @@ static void *ReaderThread(void *p)
 								  reader,
 								  0);
 
+		if(!crdr_data->usbt[idx])
+		{
+			rdr_log(reader, "SR: unable to allocate USB transfer %d", idx);
+			continue;
+		}
 		ret = libusb_submit_transfer(crdr_data->usbt[idx]);
-		if(ret != 0)
-		{
+		if(ret == 0)
 			rdr_log_dbg(reader, D_IFD, "libusb_submit_transfer ok");
-		}
 		else
-		{
-			rdr_log_dbg(reader, D_IFD, "libusb_submit_transfer failed");
-		}
+			rdr_log_dbg(reader, D_IFD, "libusb_submit_transfer failed ret=%d", ret);
 	}
 
 	while(crdr_data->running)
 	{
-		ret = libusb_handle_events(NULL);
+		struct timeval tv;
+		tv.tv_sec = 0;
+		tv.tv_usec = 200000;
+		ret = libusb_handle_events_timeout_completed(NULL, &tv, NULL);
 		if(ret != 0)
 			{ rdr_log(reader, "libusb_handle_events returned with %d", ret); }
 
@@ -1698,6 +1690,11 @@ static int32_t SR_Close(struct s_reader *reader)
 	if(crdr_data->usb_dev_handle)
 	{
 		crdr_data->closing = 1;
+		for(int32_t i = 0; i < NUM_TXFERS; i++)
+		{
+			if(crdr_data->usbt[i])
+				{ libusb_cancel_transfer(crdr_data->usbt[i]); }
+		}
 		if (init_count >= 2)
 		{
 			init_count--;

@@ -38,7 +38,6 @@ void cacheex_init_cacheex_src(ECM_REQUEST *ecm, ECM_REQUEST *er);
 void cacheex_free_csp_lastnodes(ECM_REQUEST *er);
 void checkcache_process_thread_start(void);
 void cacheex_push_out(struct s_client *cl, ECM_REQUEST *er);
-bool cacheex_check_queue_length(struct s_client *cl);
 static inline int8_t cacheex_get_rdr_mode(struct s_reader *reader) { return reader ? reader->cacheex.mode : 0; }
 void cacheex_init_hitcache(void);
 void cacheex_free_hitcache(void);
@@ -65,7 +64,6 @@ static inline void cacheex_set_cacheex_src(ECM_REQUEST *UNUSED(ecm), struct s_cl
 static inline void cacheex_init_cacheex_src(ECM_REQUEST *UNUSED(ecm), ECM_REQUEST *UNUSED(er)) { }
 static inline void checkcache_process_thread_start(void) { }
 static inline void cacheex_push_out(struct s_client *UNUSED(cl), ECM_REQUEST *UNUSED(er)) { }
-static inline bool cacheex_check_queue_length(struct s_client *UNUSED(cl)) { return 0; }
 static inline int8_t cacheex_get_rdr_mode(struct s_reader *UNUSED(reader)) { return 0; }
 static inline void cacheex_init_hitcache(void) { }
 static inline void cacheex_free_hitcache(void) { }

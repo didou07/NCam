@@ -887,7 +887,7 @@ int32_t cc_cmd_send(struct s_client *cl, uint8_t *buf, int32_t len, cc_msg_type_
 	int32_t n;
 	struct cc_data *cc = cl->cc;
 
-	if(!cl->cc || cl->kill)
+	if(!cl->cc || cl->kill || len < 0 || len > 0xFFFF)
 	{
 		return -1;
 	}
@@ -3442,7 +3442,7 @@ int32_t cc_parse_msg(struct s_client *cl, uint8_t *buf, int32_t l)
 				server_card->id = buf[10] << 24 | buf[11] << 16 | buf[12] << 8 | buf[13];
 				server_card->caid = b2i(2, data);
 
-				if((er = get_ecmtask()) && l > CCMSG_HEADER_LEN && MAX_ECM_SIZE > l - CCMSG_HEADER_LEN)
+				if((er = get_ecmtask()) && l > CCMSG_HEADER_LEN && MAX_ECM_SIZE >= l - CCMSG_HEADER_LEN)
 				{
 					er->caid = b2i(2, buf + 4);
 					er->prid = b2i(4, buf + 6);
@@ -4367,7 +4367,7 @@ int32_t cc_srv_connect(struct s_client *cl)
 	}
 	else
 	{
-		cs_add_violation(cl, NULL);
+		cs_add_auth_violation(cl, NULL);
 		return -2;
 	}
 	cs_log_dbg(D_TRACE, "ccc username received %s", usr);
@@ -4387,7 +4387,7 @@ int32_t cc_srv_connect(struct s_client *cl)
 
 	if(i != 6) // received invalid password length
 	{
-		cs_add_violation(cl, usr);
+		cs_add_auth_violation(cl, usr);
 		return -2;
 	}
 
@@ -4450,8 +4450,6 @@ int32_t cc_srv_connect(struct s_client *cl)
 		{
 			cs_log("password for '%s' invalid!", usr);
 		}
-
-		cs_add_violation(cl, usr);
 		return -2;
 	}
 
@@ -4464,7 +4462,7 @@ int32_t cc_srv_connect(struct s_client *cl)
 	if(cl->disabled)
 	{
 		cs_log("account '%s' disabled, blocking+disconnect!", usr);
-		cs_add_violation(cl, usr);
+		cs_add_auth_violation(cl, usr);
 		return -2;
 	}
 

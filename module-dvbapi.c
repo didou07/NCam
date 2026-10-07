@@ -15,6 +15,8 @@
 #include "module-stat.h"
 #include "module-streamrelay.h"
 #include "ncam-chk.h"
+#include "ncam-country.h"
+#include "ncam-failban.h"
 #include "ncam-client.h"
 #include "ncam-config.h"
 #include "ncam-ecm.h"
@@ -4162,29 +4164,23 @@ void request_cw(struct s_client *client, ECM_REQUEST *er, int32_t demux_id, uint
 
 		if(!memcmp(demux[demux_id].demux_fd[filternum].prevecmd5, md5tmp, CS_ECMSTORESIZE))
 		{
-			if(demux[demux_id].demux_fd[filternum].prevresult < E_NOTFOUND)
+			if(demux[demux_id].demux_fd[filternum].prevresult == 0xFF)
 			{
-				cs_log_dbg(D_DVBAPI, "Demuxer %d not requesting same ecm again! -> SKIP!", demux_id);
+				cs_log_dbg(D_DVBAPI, "Demuxer %d duplicate ecm is still pending -> coalesce", demux_id);
 				NULLFREE(er);
 				return;
 			}
-			else
-			{
-				cs_log_dbg(D_DVBAPI, "Demuxer %d requesting same ecm again (previous result was not found!)", demux_id);
-			}
+			cs_log_dbg(D_DVBAPI, "Demuxer %d requesting repeated ecm after completed result", demux_id);
 		}
 		else if(!memcmp(demux[demux_id].demux_fd[filternum].lastecmd5, md5tmp, CS_ECMSTORESIZE))
 		{
-			if(demux[demux_id].demux_fd[filternum].lastresult < E_NOTFOUND)
+			if(demux[demux_id].demux_fd[filternum].lastresult == 0xFF)
 			{
-				cs_log_dbg(D_DVBAPI, "Demuxer %d not requesting same ecm again! -> SKIP!", demux_id);
+				cs_log_dbg(D_DVBAPI, "Demuxer %d duplicate ecm is still pending -> coalesce", demux_id);
 				NULLFREE(er);
 				return;
 			}
-			else
-			{
-				cs_log_dbg(D_DVBAPI, "Demuxer %d requesting same ecm again (previous result was not found!)", demux_id);
-			}
+			cs_log_dbg(D_DVBAPI, "Demuxer %d requesting repeated ecm after completed result", demux_id);
 		}
 
 		memcpy(demux[demux_id].demux_fd[filternum].prevecmd5, demux[demux_id].demux_fd[filternum].lastecmd5, CS_ECMSTORESIZE);
@@ -7301,14 +7297,21 @@ static void *dvbapi_main_local(void *cli)
 							connfd = accept(listenfd, (struct sockaddr *)&servaddr, (socklen_t *)&clilen);
 							cs_log_dbg(D_DVBAPI, "new socket connection fd: %d", connfd);
 
-							if(dvbapi_listenport_active)
+							if(connfd > 0 && dvbapi_listenport_active)
 							{
+								if(!ncam_country_access_allowed(SIN_GET_ADDR(servaddr)) || cs_check_violation(SIN_GET_ADDR(servaddr), dvbapi_listenport_active))
+								{
+									close(connfd);
+									connfd = -1;
+									continue;
+								}
+
 								// update webif data
 								client->ip = SIN_GET_ADDR(servaddr);
 								client->port = ntohs(SIN_GET_PORT(servaddr));
 							}
 
-							add_to_assoc_fd(connfd);
+									add_to_assoc_fd(connfd);
 
 							if(cfg.dvbapi_pmtmode == 3 || cfg.dvbapi_pmtmode == 0)
 							{

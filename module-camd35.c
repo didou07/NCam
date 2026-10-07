@@ -212,7 +212,8 @@ static int32_t camd35_recv(struct s_client *client, uint8_t *buf, int32_t l)
 
 								if(errno == EAGAIN)
 								{
-									continue; // EAGAIN needs select procedure again
+									rc = -1;
+									break;
 								}
 
 								cs_log_dbg(client->typ == 'c' ? D_CLIENT : D_READER, "ERROR: %s (errno=%d %s)",
@@ -242,7 +243,8 @@ static int32_t camd35_recv(struct s_client *client, uint8_t *buf, int32_t l)
 
 								if(errno == EAGAIN)
 								{
-									continue; // EAGAIN needs select procedure again
+									rc = -1;
+									break;
 								}
 
 								cs_log_dbg(client->typ == 'c' ? D_CLIENT : D_READER, "ERROR: %s (errno=%d %s)",
@@ -338,6 +340,12 @@ static int32_t camd35_recv(struct s_client *client, uint8_t *buf, int32_t l)
 				}
 
 				n = boundary(4, n + 20 + buflen);
+				if(n < 20 || n > l)
+				{
+					cs_log_dbg(client->typ == 'c' ? D_CLIENT : D_READER, "invalid camd35 packet size %d (buffer=%d)", n, l);
+					rc = -3;
+					goto out;
+				}
 
 				if(!(client->is_udp && client->typ == 'c') && (rs < n) && ((n - 32) > 0))
 				{
@@ -359,7 +367,8 @@ static int32_t camd35_recv(struct s_client *client, uint8_t *buf, int32_t l)
 
 							if(errno == EAGAIN)
 							{
-								continue; // EAGAIN needs select procedure again
+								rc = -1;
+								break;
 							}
 
 							cs_log_dbg(client->typ == 'c' ? D_CLIENT : D_READER, "ERROR: %s (errno=%d %s)",

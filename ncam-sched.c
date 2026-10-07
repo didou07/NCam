@@ -33,6 +33,13 @@ sched_ctx_t g_sched = {0};
  * Process: Iterates through steps, handles each type, updates job state on completion
  * Thread Safety: Uses mutex for state transitions, detaches on completion
  */
+static void sched_sleep_interruptible(int32_t seconds)
+{
+    if(seconds <= 0) return;
+    for(int32_t i = 0; i < seconds * 10 && g_sched.running; i++)
+        usleep(100000);
+}
+
 static void *sched_job_run(void *arg)
 {
     job_t *job = (job_t *)arg;                           // Cast thread argument
@@ -62,7 +69,7 @@ static void *sched_job_run(void *arg)
             case STEP_SLEEP:
                 // Pause execution for specified duration
                 if (job->steps[i].data.sleep_sec > 0) {
-                    sleep(job->steps[i].data.sleep_sec);
+                    sched_sleep_interruptible(job->steps[i].data.sleep_sec);
                 }
                 break;
         }
@@ -141,7 +148,7 @@ static void *sched_loop(void *UNUSED(arg))
                     job->is_running = 0;                 // Reset on failure
                     cs_log("[%s] Failed to create thread", job->name);
                 } else {
-                    pthread_detach(job->thread);         // Auto-cleanup on completion
+                    job->thread_started = 1;
                 }
             }
         }
@@ -217,23 +224,20 @@ void ncam_sched_shutdown(void)
     g_sched.running = 0;
     pthread_join(g_sched.thread, NULL);                  // Wait for main thread
 
-    // Step 2: Wait for worker threads to complete (max 10 seconds)
-    int w, i;
-    for (w = 0; w < 100; w++) {
-        int running = 0;
-        cs_writelock(__func__, &g_sched.lock);
-        for (i = 0; i < g_sched.job_count; i++)
-            if (g_sched.jobs[i].is_running) running++;   // Count active workers
-        cs_writeunlock(__func__, &g_sched.lock);
-
-        if (!running) break;                             // All threads completed
-        usleep(100000);                                  // Wait 100ms
+    // Step 2: Join every worker that was created. This prevents a worker from
+    // dereferencing a job or g_sched.jobs after shutdown frees the arrays.
+    int i;
+    for (i = 0; i < g_sched.job_count; i++) {
+        if (g_sched.jobs[i].thread_started) {
+            pthread_join(g_sched.jobs[i].thread, NULL);
+            g_sched.jobs[i].thread_started = 0;
+        }
     }
 
     // Step 3: Free allocated resources
     for (i = 0; i < g_sched.job_count; i++)
         if (g_sched.jobs[i].steps)
-            NULLFREE(g_sched.jobs[i].steps);             // Free each job's step array
+            NULLFREE(g_sched.jobs[i].steps);
 
     NULLFREE(g_sched.jobs);                              // Free the jobs array itself
 

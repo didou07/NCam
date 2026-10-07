@@ -1229,3 +1229,7 @@ a:hover .GeoResultsTABLE{
 	zoom: 1.0;
 	width: device-width;
 }
+
+.country_flag{font-size:1.05em;white-space:nowrap}.country_status{font-weight:600}.cfg_hint{opacity:.72;font-size:.9em}
+
+.failban_access{max-width:520px;margin:12px auto}.failban_access th{text-align:left}.failban_access td{padding:6px 8px}.failban_access input[type=text]{width:100%;box-sizing:border-box}.failban_access input.short{width:80px}.failban_access .cfg_hint{margin-left:4px}.failban_access button{min-width:90px}

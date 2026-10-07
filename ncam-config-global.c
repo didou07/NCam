@@ -9,6 +9,7 @@
 #include "ncam-conf-mk.h"
 #include "ncam-config.h"
 #include "ncam-net.h"
+#include "ncam-country.h"
 #include "ncam-string.h"
 #ifdef CS_CACHEEX_AIO
 #include "module-cacheex.h"
@@ -421,8 +422,6 @@ static const struct config_list global_opts[] =
 #endif
 	DEF_OPT_FUNC("double_check_caid"               , OFS(double_check_caid)             , chk_ftab_fn),
 	DEF_OPT_STR("ecmfmt"                           , OFS(ecmfmt)                        , NULL),
-	DEF_OPT_INT32("failbantime"                    , OFS(failbantime)                   , 0),
-	DEF_OPT_INT32("failbancount"                   , OFS(failbancount)                  , 0),
 	DEF_OPT_INT8("suppresscmd08"                   , OFS(c35_suppresscmd08)             , 0),
 	DEF_OPT_INT8("getblockemmauprovid"             , OFS(getblockemmauprovid)           , 0),
 	DEF_OPT_INT8("double_check"                    , OFS(double_check)                  , 0),
@@ -1387,6 +1386,16 @@ static const struct config_list dvbapi_opts[] =
 static const struct config_list dvbapi_opts[] = { DEF_LAST_OPT };
 #endif
 
+static const struct config_list failban_opts[] =
+{
+	DEF_OPT_INT32("failbantime"       , OFS(failbantime)               , 0),
+	DEF_OPT_INT32("failbancount"      , OFS(failbancount)              , 0),
+	DEF_OPT_INT8("countryenabled"    , OFS(http_country_enabled)        , 1),
+	DEF_OPT_STR("allowedcountries"   , OFS(http_allowed_countries)       , NULL),
+	DEF_OPT_FUNC("countryexceptions" , OFS(http_country_exceptions)    , iprange_fn, .free_value = iprange_free_fn),
+	DEF_LAST_OPT
+};
+
 #ifdef LCDSUPPORT
 static void lcd_fixups_fn(void *UNUSED(var))
 {
@@ -1415,6 +1424,7 @@ static const struct config_list lcd_opts[] = { DEF_LAST_OPT };
 static const struct config_sections ncam_conf[] =
 {
 	{ "global", global_opts }, // *** MUST BE FIRST ***
+	{ "failban", failban_opts },
 	{ "anticasc", anticasc_opts },
 	{ "cache", cache_opts },
 	{ "lcd", lcd_opts },
@@ -1556,7 +1566,16 @@ int32_t init_config(void)
 		*value++ = '\0';
 		char *tvalue = trim(value);
 		char *ttoken = trim(strtolower(token));
-		if(cur_section && !config_list_parse(cur_section->config, ttoken, tvalue, &cfg))
+		bool parsed = false;
+		if(cur_section == ncam_conf && config_list_parse(failban_opts, ttoken, tvalue, &cfg))
+		{
+			parsed = true;
+		}
+		else if(cur_section && config_list_parse(cur_section->config, ttoken, tvalue, &cfg))
+		{
+			parsed = true;
+		}
+		if(!parsed)
 		{
 			fprintf(stderr, "WARNING: %s line %d section [%s] contains unknown setting '%s=%s'\n",
 					cs_conf, line, cur_section->section, ttoken, tvalue);

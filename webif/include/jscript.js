@@ -518,6 +518,13 @@ function is_nopoll(value) {
 /*
  * Userpage Functions: Update Page
  */
+function countryFlag(code) {
+	if (!code || code.length !== 2 || code === '--' || code === '??') return '';
+	code = code.toUpperCase();
+	if (code < 'AA' || code > 'ZZ') return '';
+	return String.fromCodePoint(code.charCodeAt(0) + 127397, code.charCodeAt(1) + 127397);
+}
+
 function updateUserpage(data) {
 
 	// update user lines
@@ -550,6 +557,9 @@ function updateUserpage(data) {
 					.attr('title', item.user.stats.expectsleep != 'undefined' ? (item.user.stats.expectsleep > 0 ? 'Sleeping in ' + item.user.stats.expectsleep + ' minutes' : 'Sleeping') : '')
 					.data('sort-value', item.user.ip)
 					.html("<B>" + item.user.status + "</B><br>" + item.user.ip);
+			}
+			if (!is_nopoll('usercol26')) {
+				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr('title', item.user.countryname || '').text(countryFlag(item.user.country)));
 			}
 
 			if (!is_nopoll('usercol3')) {
@@ -690,6 +700,9 @@ function updateUserpage(data) {
 					.attr('title', '')
 					.data('sort-value', item.user.ip)
 					.html("<B>" + item.user.status + "</B><br>" + item.user.ip);
+			}
+			if (!is_nopoll('usercol26')) {
+				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr('title', item.user.countryname || '').text(countryFlag(item.user.country)));
 			}
 
 			if (!is_nopoll('usercol3')) {
@@ -1053,7 +1066,7 @@ function addremoveSubheadline(remove, data, container, subheadline, type) {
 
 	if (remove == 0 && !$("#" + subheadline).length) {
 		$(container).removeAttr('style');
-		var strheadline = '<TR id="' + subheadline + '"><TD CLASS="subheadline" COLSPAN="12">';
+		var strheadline = '<TR id="' + subheadline + '"><TD CLASS="subheadline" COLSPAN="13">';
 		if (type == 'c') {
 			if (data.ncam.status.ucac != '') { //hide idle clients
 				strheadline += '<P id="chead">Clients <span id="ucs">' + data.ncam.status.ucs + '</span>/<span id="uca">' + data.ncam.status.uca + '</span> (<span id="ucac">' + data.ncam.status.ucac + '</span> with ECM within last <span id="cfgh">' + data.ncam.status.cfgh + '</span> seconds)</P>'
@@ -1203,7 +1216,7 @@ function updateStatuspage(data) {
 		if (!$(uid).length && 'rpcxm'.indexOf(item.type) > (-1)) {
 			//build new row
 			var rowcontent = '<TR ID="' + item.thid + '"><TD CLASS="statuscol0"/><TD CLASS="statuscol1"/><TD CLASS="statuscol4"/>';
-			rowcontent += '<TD CLASS="statuscol5"/><TD CLASS="statuscol7"/><TD CLASS="statuscol8"/><TD CLASS="statuscol9"/>';
+			rowcontent += '<TD CLASS="statuscol5"/><TD CLASS="statuscol7"/><TD CLASS="statuscol17"/><TD CLASS="statuscol8"/><TD CLASS="statuscol9"/>';
 			rowcontent += '<TD CLASS="statuscol12"/><TD CLASS="statuscol13"/><TD CLASS="statuscol14"/><TD CLASS="statuscol15"/>';
 			rowcontent += '<TD CLASS="statuscol16"/></TR>';
 			newrow = $(rowcontent);
@@ -1339,6 +1352,10 @@ function updateStatuspage(data) {
 		}
 		if (!is_nopoll('statuscol7')) {
 			$(uid + " > td.statuscol7").text(item.connection.ip);
+		}
+		if (!is_nopoll('statuscol17')) {
+			var countryCode = (typeof item.connection.country === 'string' && item.connection.country.length === 2 && item.connection.country !== '??' && item.connection.country !== '--') ? item.connection.country.toUpperCase() : '';
+			$(uid + " > td.statuscol17").empty().append($('<span class="country_flag">').attr('title', item.connection.countryname || '').text(countryFlag(countryCode)));
 		}
 		if (!is_nopoll('statuscol8')) {
 			$(uid + " > td.statuscol8").text(item.connection.port);

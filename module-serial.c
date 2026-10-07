@@ -322,11 +322,11 @@ static int32_t ncam_ser_set_serial_device(int32_t fd, speed_t baud)
 	tio.c_iflag = IGNPAR;
 	tio.c_cc[VMIN] = 1;
 	tio.c_cc[VTIME] = 0;
-	//#if !defined(__CYGWIN__)
+#if !defined(__CYGWIN__)
 	ncam_ser_set_baud(&tio, B1200);
 	tcsetattr(fd, TCSANOW, &tio);
 	cs_sleepms(500);
-	//#endif
+#endif
 	ncam_ser_set_baud(&tio, baud);
 	return (tcsetattr(fd, TCSANOW, &tio));
 }
@@ -340,26 +340,50 @@ static int32_t ncam_ser_poll(int32_t event, struct s_client *client)
 	msec = comp_timeb(&client->serialdata->tpe, &tpc);
 	if(msec < 0)
 		{ return (0); }
-	pfds.fd = cur_client()->pfd;
+	pfds.fd = client->pfd;
 	pfds.events = event;
 	pfds.revents = 0;
 	if(poll(&pfds, 1, msec) != 1)
 		{ return (0); }
-	else
-		{ return (((pfds.revents)&event) == event); }
+	return (((pfds.revents)&event) == event);
 }
 
 static int32_t ncam_ser_write(struct s_client *client, const uint8_t *const buf, int32_t n)
 {
-	int32_t i;
-	for(i = 0; (i < n) && (ncam_ser_poll(POLLOUT, client)); i++)
+	int32_t total = 0;
+	const int32_t delay = client->serialdata->ncam_ser_delay;
+
+	if(!delay)
 	{
-		if(client->serialdata->ncam_ser_delay)
-			{ cs_sleepms(client->serialdata->ncam_ser_delay); }
-		if(write(client->pfd, buf + i, 1) < 1)
-			{ break; }
+		while(total < n && ncam_ser_poll(POLLOUT, client))
+		{
+			ssize_t written = write(client->pfd, buf + total, (size_t)(n - total));
+			if(written > 0)
+			{
+				total += (int32_t)written;
+				continue;
+			}
+			if(written < 0 && (errno == EINTR || errno == EAGAIN))
+			{ continue; }
+			break;
+		}
+		return total;
 	}
-	return (i);
+
+	while(total < n && ncam_ser_poll(POLLOUT, client))
+	{
+		cs_sleepms(delay);
+		ssize_t written = write(client->pfd, buf + total, 1);
+		if(written == 1)
+		{
+			++total;
+			continue;
+		}
+		if(written < 0 && (errno == EINTR || errno == EAGAIN))
+		{ continue; }
+		break;
+	}
+	return total;
 }
 
 static int32_t ncam_ser_send(struct s_client *client, const uint8_t *const buf, int32_t l)
@@ -382,16 +406,44 @@ static int32_t ncam_ser_send(struct s_client *client, const uint8_t *const buf, 
 
 static int32_t ncam_ser_selrec(uint8_t *buf, int32_t n, int32_t l, int32_t *c)
 {
-	int32_t i;
+	struct s_client *client = cur_client();
+	if(!client || !client->serialdata) { return (0); }
 	if(*c + n > l)
 		{ n = l - *c; }
 	if(n <= 0) { return (0); }
-	for(i = 0; (i < n) && (ncam_ser_poll(POLLIN, cur_client())); i++)
-		if(read(cur_client()->pfd, buf + *c, 1) < 1)
-			{ return (0); }
-		else
-			{ (*c)++; }
-	return (i == n);
+	const int32_t target = *c + n;
+
+	if(!client->serialdata->ncam_ser_delay)
+	{
+		while(*c < target && ncam_ser_poll(POLLIN, client))
+		{
+			ssize_t received = read(client->pfd, buf + *c, (size_t)(target - *c));
+			if(received > 0)
+			{
+				if(received > target - *c) { received = target - *c; }
+				*c += (int32_t)received;
+				continue;
+			}
+			if(received < 0 && (errno == EINTR || errno == EAGAIN))
+			{ continue; }
+			return (0);
+		}
+		return (*c >= target);
+	}
+
+	for(int32_t i = 0; (i < n) && (ncam_ser_poll(POLLIN, client)); i++)
+	{
+		ssize_t received = read(client->pfd, buf + *c, 1);
+		if(received == 1)
+		{
+			++*c;
+			continue;
+		}
+		if(received < 0 && (errno == EINTR || errno == EAGAIN))
+		{ --i; continue; }
+		return (0);
+	}
+	return (*c >= target);
 }
 
 static int32_t ncam_ser_recv(struct s_client *client, uint8_t *xbuf, int32_t l)
@@ -1229,7 +1281,10 @@ static void *ncam_ser_fork(void *pthreadparam)
 	cl->account = first_client->account;
 
 	if(!cl->serialdata && !cs_malloc(&cl->serialdata, sizeof(struct s_serial_client)))
-		{ return NULL; }
+	{
+		free_client(cl);
+		return NULL;
+	}
 
 	set_thread_name(__func__);
 	ncam_init_serialdata(cl->serialdata);
@@ -1240,7 +1295,10 @@ static void *ncam_ser_fork(void *pthreadparam)
 		// reader struct for serial network connection
 		struct s_reader *newrdr;
 		if(!cs_malloc(&newrdr, sizeof(struct s_reader)))
-			{ return NULL; }
+		{
+			free_client(cl);
+			return NULL;
+		}
 		memset(newrdr, 0, sizeof(struct s_reader));
 		newrdr->client = cl;
 		newrdr->ph = *serial_ph;
@@ -1263,11 +1321,17 @@ static void *ncam_ser_fork(void *pthreadparam)
 		if(cl->pfd)
 			{ ncam_ser_server(); }
 		else
-			{ cs_sleepms(60000); } // retry in 1 min. (USB-Device ?)
-		if(cl->pfd) { close(cl->pfd); }
+			{ cs_sleepms(60000); }
+		if(cl->pfd)
+		{
+			close(cl->pfd);
+			cl->pfd = 0;
+		}
 	}
-	NULLFREE(cl->serialdata);
-	NULLFREE(cl->reader);
+
+	struct s_reader *rdr = cl->reader;
+	free_client(cl);
+	NULLFREE(rdr);
 	return NULL;
 }
 

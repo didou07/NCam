@@ -25,6 +25,8 @@
 #include "ncam-garbage.h"
 #include "ncam-cache.h"
 #include "ncam-client.h"
+#include "ncam-country.h"
+#include "ncam-failban.h"
 #include "ncam-lock.h"
 #include "ncam-net.h"
 #include "ncam-reader.h"
@@ -54,9 +56,28 @@ pthread_key_t getkeepalive;
 static pthread_key_t getip;
 pthread_key_t getssl;
 static CS_MUTEX_LOCK http_lock;
+static pthread_mutex_t webif_worker_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t webif_worker_cond = PTHREAD_COND_INITIALIZER;
+static uint32_t webif_worker_count = 0;
+#define WEBIF_MAX_WORKERS 64
 CS_MUTEX_LOCK *lock_cs;
 
 static void webif_add_client_proto(struct templatevars *vars, struct s_client *cl, const char *proto, int8_t apicall);
+static void webif_set_client_country(struct templatevars *vars, IN_ADDR_T ip, int ip_set)
+{
+	char code[NCAM_COUNTRY_CODE_STR_LEN] = "--";
+	char flag[16] = "";
+	const char *name = "Unknown";
+	if(ip_set && ncam_country_lookup(ip, code))
+	{
+		name = ncam_country_name(code);
+		ncam_country_flag(code, flag, sizeof(flag));
+	}
+	tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYCODE", code);
+	tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYNAME", name);
+	tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYFLAG", flag);
+}
+
 
 static uint8_t useLocal = 1;
 #define PRINTF_LOCAL_D useLocal ? "%'d" : "%d"
@@ -681,6 +702,8 @@ static void webif_save_config(char *section, struct templatevars *vars, struct u
 	}
 	if(write_config() == 0)
 	{
+		if(streq(section, "global") || streq(section, "webif"))
+			{ ncam_country_reload(); }
 		tpl_addMsg(vars, "Configuration was saved.");
 		enum refreshtypes ref_type = REFR_SERVER;
 		if(streq(getParam(params, "part"), "anticasc"))
@@ -1541,6 +1564,9 @@ static char *send_ncam_config_webif(struct templatevars *vars, struct uriparams 
 	tpl_addVar(vars, TPLADD, "HTTPUSER", cfg.http_user);
 	tpl_addVar(vars, TPLADD, "HTTPPASSWORD", cfg.http_pwd);
 	tpl_addVar(vars, TPLADD, "HTTPNCAMLABEL", cfg.http_ncam_label);
+	char *http_allow = mk_t_iprange(cfg.http_allowed);
+	tpl_addVar(vars, TPLADD, "HTTPALLOW", http_allow);
+	free_mk_t(http_allow);
 
 	// css style selector
 	tpl_printf(vars, TPLADD, "CSSOPTIONS", "\t\t\t\t\t\t<option value=\"\"%s>embedded</option>\n",
@@ -1617,9 +1643,6 @@ static char *send_ncam_config_webif(struct templatevars *vars, struct uriparams 
 
 	tpl_addVar(vars, TPLADD, "HTTPUTF8", (cfg.http_utf8 == 1) ? "checked" : "");
 
-	char *value = mk_t_iprange(cfg.http_allowed);
-	tpl_addVar(vars, TPLADD, "HTTPALLOW", value);
-	free_mk_t(value);
 
 	for(i = 0; i < MAX_HTTP_DYNDNS; i++)
 	{
@@ -2015,7 +2038,7 @@ static char *send_ncam_reader(struct templatevars *vars, struct uriparams *param
 
 				if(rdr->typ != R_GBOX)
 					{
-							restart_cardreader(rdr, 1);
+							reader_set_enabled_async(rdr, rdr->enable);
 					}
 #ifdef MODULE_GBOX
 				else
@@ -2475,13 +2498,27 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 		chk_reader("lb_whitelist_services", servicelabelslb, rdr);
 		chk_reader("lb_priority_services", servicelabelslbprio, rdr);
 
+		if(rdr->old_ecm_enabled)
+			rdr->fastreset_enabled = 0;
+		else if(rdr->fastreset_enabled)
+			rdr->old_ecm_enabled = 0;
+		if(rdr->old_ecm_successes < 1 || rdr->old_ecm_successes > 1000000)
+			rdr->old_ecm_successes = 10;
+		if(!rdr->old_ecm_enabled)
+		{
+			rdr->old_ecm_success_count = 0;
+			rdr->old_ecm_valid = 0;
+			rdr->old_ecm_queued = 0;
+			rdr->old_ecm_config_hash = 0;
+		}
+
 		if(is_network_reader(rdr) || rdr->typ == R_EMU)    //physical readers make trouble if re-started
 		{
 			if(rdr)
 				{
 					if(rdr->typ != R_GBOX)
 						{
-							restart_cardreader(rdr, 1);
+							reader_set_enabled_async(rdr, rdr->enable);
 						}
 #ifdef MODULE_GBOX
 					else
@@ -2562,11 +2599,8 @@ static char *send_ncam_reader_config(struct templatevars *vars, struct uriparams
 	tpl_addVar(vars, TPLADD, "FASTRESETENABLEDCHECKED", (rdr->fastreset_enabled == 1) ? "checked" : "");
 	tpl_printf(vars, TPLADD, "FASTRESETINTERVAL", "%d", rdr->fastreset_interval);
 	tpl_addVar(vars, TPLADD, "OLDECMENABLEDCHECKED", (rdr->old_ecm_enabled == 1) ? "checked" : "");
-	tpl_addVar(vars, TPLADD, "OLDECMSOURCEAUTOSELECTED", (rdr->old_ecm_source == 0) ? "selected" : "");
+	tpl_addVar(vars, TPLADD, "OLDECMSOURCEFIRSTSELECTED", (rdr->old_ecm_source == 0) ? "selected" : "");
 	tpl_addVar(vars, TPLADD, "OLDECMSOURCEMANUALSELECTED", (rdr->old_ecm_source == 1) ? "selected" : "");
-	tpl_addVar(vars, TPLADD, "OLDECMTRIGGERINTERVALSELECTED", (rdr->old_ecm_trigger == 0) ? "selected" : "");
-	tpl_addVar(vars, TPLADD, "OLDECMTRIGGERSUCCESSESSELECTED", (rdr->old_ecm_trigger == 1) ? "selected" : "");
-	tpl_printf(vars, TPLADD, "OLDECMINTERVAL", "%d", rdr->old_ecm_interval);
 	tpl_printf(vars, TPLADD, "OLDECMSUCCESSES", "%d", rdr->old_ecm_successes);
 	tpl_addVar(vars, TPLADD, "OLDECM", rdr->old_ecm);
 
@@ -4843,6 +4877,9 @@ static char *send_ncam_user_config(struct templatevars *vars, struct uriparams *
 		tpl_addVar(vars, TPLADD, "CWLASTRESPONSETMS", "");
 		tpl_addVar(vars, TPLADD, "CLIENTIP", "");
 		tpl_addVar(vars, TPLADD, "CLIENTPORT", "");
+		tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYCODE", "--");
+		tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYNAME", "Unknown");
+		tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYFLAG", "");
 		tpl_addVar(vars, TPLADD, "LASTCHANNELTITLE", "");
 		tpl_addVar(vars, TPLADD, "LASTCHANNELSORT", "");
 		tpl_addVar(vars, TPLADD, "CLIENTTIMEONCHANNELAPI", "");
@@ -4995,11 +5032,14 @@ static char *send_ncam_user_config(struct templatevars *vars, struct uriparams *
 			{
 				connected_users += 1;
 				if(IP_ISSET(latestclient->ip))
-					{ tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(latestclient->ip)); }
+				{
+					tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(latestclient->ip));
+					webif_set_client_country(vars, latestclient->ip, 1);
+				}
 				else if(latestclient->login > latestclient->logout)
-					{ tpl_addVar(vars, TPLADD, "CLIENTIP", "camd.socket"); }
+				{ tpl_addVar(vars, TPLADD, "CLIENTIP", "camd.socket"); }
 				else
-					{ tpl_addVar(vars, TPLADD, "CLIENTIP", ""); }
+				{ tpl_addVar(vars, TPLADD, "CLIENTIP", ""); }
 				if(isactive > 0 || conn > 0)
 				{
 					tpl_printf(vars, TPLADD, "CLIENTPORT", "%d", latestclient->port);
@@ -6047,6 +6087,9 @@ static char *send_ncam_status(struct templatevars * vars, struct uriparams * par
 			tpl_addVar(vars, TPLADD, "CLIENTLASTRESPONSETIMEHIST", "");
 			tpl_addVar(vars, TPLADD, "UPICMISSING" , "");
 			tpl_addVar(vars, TPLADD, "ENTITLEMENTS", "");
+			tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYCODE", "--");
+			tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYNAME", "Unknown");
+			tpl_addVar(vars, TPLADD, "CLIENTCOUNTRYFLAG", "");
 
 			if(cl->typ == 'c')
 				{ user_count_all++; }
@@ -6285,7 +6328,10 @@ static char *send_ncam_status(struct templatevars * vars, struct uriparams * par
 					if(cl->typ == 'r' && cl->reader && !is_network_reader(cl->reader))
 						{ tpl_addVar(vars, TPLADD, "CLIENTIP", "local"); }
 					else if(IP_ISSET(cl->ip))
-						{ tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(cl->ip)); }
+					{
+						tpl_addVar(vars, TPLADD, "CLIENTIP", cs_inet_ntoa(cl->ip));
+						webif_set_client_country(vars, cl->ip, 1);
+					}
 					else if((cl->typ == 'p' || cl->typ == 'r') && cl->reader && cl->reader->tcp_connected)
 						{ tpl_addVar(vars, TPLADD, "CLIENTIP", "camd.socket"); }
 					else if(cl->typ == 'c' && cl->login > cl->logout)
@@ -7380,6 +7426,33 @@ static char *send_ncam_shutdown(struct templatevars * vars, FILE * f, struct uri
 	}
 }
 
+static int8_t webif_safe_script_name(const char *name)
+{
+	size_t len;
+	if(!name) { return 0; }
+	len = cs_strlen(name);
+	if(len == 0 || len > 127 || strstr(name, "..") || strchr(name, '/') || strchr(name, '\\')) { return 0; }
+	if(!(is_ext((char *)name, ".script") || is_ext((char *)name, ".sh"))) { return 0; }
+	for(size_t i = 0; i < len; ++i)
+	{
+		unsigned char c = (unsigned char)name[i];
+		if(!(isalnum(c) || c == '_' || c == '-' || c == '.')) { return 0; }
+	}
+	return 1;
+}
+
+static int8_t webif_safe_script_param(const char *param)
+{
+	if(!param || !*param) { return 1; }
+	if(cs_strlen(param) > 200) { return 0; }
+	for(size_t i = 0; param[i]; ++i)
+	{
+		unsigned char c = (unsigned char)param[i];
+		if(!(isalnum(c) || c == '_' || c == '-' || c == '.' || c == '/' || c == ':' || c == '=' || c == '+' || c == '@' || c == '%' || c == ',' || c == ' ')) { return 0; }
+	}
+	return 1;
+}
+
 static char *send_ncam_script(struct templatevars * vars, struct uriparams * params)
 {
 	setActiveMenu(vars, MNU_SCRIPT);
@@ -7394,9 +7467,9 @@ static char *send_ncam_script(struct templatevars * vars, struct uriparams * par
 		{
 			for( i = 0 ; i < count; i++ )
 			{
-				if(is_ext(namelist[i]->d_name, ".script") || is_ext(namelist[i]->d_name, ".sh"))
+				if(webif_safe_script_name(namelist[i]->d_name))
 				{
-					tpl_printf(vars, TPLAPPEND, "SCRIPTOPTIONS", "<option value=\"script.html?scriptname=%s\">%s</option>\n",namelist[i]->d_name,namelist[i]->d_name);
+					tpl_printf(vars, TPLAPPEND, "SCRIPTOPTIONS", "<option value=\"script.html?scriptname=%s\">%s</option>\n", urlencode(vars, namelist[i]->d_name), xml_encode(vars, namelist[i]->d_name));
 				}
 				free( namelist[i] );
 			}
@@ -7405,9 +7478,29 @@ static char *send_ncam_script(struct templatevars * vars, struct uriparams * par
 
 		char *scriptname = getParam(params, "scriptname");
 		char *scriptparam = getParam(params, "scriptparam");
-		char system_str[256];
+		char system_str[512];
 		struct stat s;
-		snprintf(system_str, sizeof(system_str), "%s/%s", cfg.http_script, scriptname);
+		if(!scriptname || !*scriptname)
+		{
+			tpl_printf(vars, TPLADD, "SCRIPTNAME", "scriptname: ");
+			return tpl_getTpl(vars, "SCRIPT");
+		}
+		if(!webif_safe_script_name(scriptname))
+		{
+			tpl_printf(vars, TPLADD, "CODE", "invalid script name");
+			return tpl_getTpl(vars, "SCRIPT");
+		}
+		if(scriptparam && !webif_safe_script_param(scriptparam))
+		{
+			tpl_printf(vars, TPLADD, "CODE", "invalid script parameter");
+			tpl_printf(vars, TPLADD, "SCRIPTNAME", "scriptname: %s", xml_encode(vars, scriptname));
+			return tpl_getTpl(vars, "SCRIPT");
+		}
+		if(snprintf(system_str, sizeof(system_str), "%s/%s", cfg.http_script, scriptname) >= (int)sizeof(system_str))
+		{
+			tpl_printf(vars, TPLADD, "CODE", "script path too long");
+			return tpl_getTpl(vars, "SCRIPT");
+		}
 
 		if(!stat(system_str,&s))
 		{
@@ -7419,10 +7512,18 @@ static char *send_ncam_script(struct templatevars * vars, struct uriparams * par
 					FILE *fp;
 					char buf[256];
 
-					if((scriptparam != NULL) && (sizeof(scriptparam) > 0))
+					if(scriptparam && *scriptparam)
 					{
-						cs_strncpy(system_str + cs_strlen(system_str), " ", 2);
-						cs_strncpy(system_str + cs_strlen(system_str), scriptparam, cs_strlen(scriptparam) + 1);
+						size_t used = cs_strlen(system_str);
+						size_t plen = cs_strlen(scriptparam);
+						if(used + 1 + plen >= sizeof(system_str))
+						{
+							tpl_printf(vars, TPLADD, "CODE", "script parameter too long");
+							tpl_printf(vars, TPLADD, "SCRIPTNAME", "scriptname: %s", xml_encode(vars, scriptname));
+							return tpl_getTpl(vars, "SCRIPT");
+						}
+						system_str[used++] = ' ';
+						memcpy(system_str + used, scriptparam, plen + 1);
 					}
 
 					fp = popen(system_str,"r");
@@ -7431,23 +7532,27 @@ static char *send_ncam_script(struct templatevars * vars, struct uriparams * par
 					{
 						while (fgets(buf, sizeof(buf), fp) != NULL)
 						{
-							tpl_addVar(vars, TPLAPPEND, "SCRIPTRESULTOUT", buf);
+							tpl_addVar(vars, TPLAPPEND, "SCRIPTRESULTOUT", xml_encode(vars, buf));
 						}
 
-						rc = pclose(fp)/256;
+						int32_t status = pclose(fp);
+					if(status >= 0)
+					{
+						rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+					}
 					}
 					tpl_printf(vars, TPLAPPEND, "CODE", "returncode: %d", rc);
-					tpl_printf(vars, TPLADD, "SCRIPTNAME", "scriptname: %s", scriptname);
+					tpl_printf(vars, TPLADD, "SCRIPTNAME", "scriptname: %s", xml_encode(vars, scriptname));
 				}
 				else
 				{
-					tpl_printf(vars, TPLADD, "SCRIPTRESULTOUT", "[Error]: Script \"%s\" not executable!", scriptname);
+					tpl_printf(vars, TPLADD, "SCRIPTRESULTOUT", "[Error]: Script \"%s\" not executable!", xml_encode(vars, scriptname));
 				}
 			}
 		}
 		else
 		{
-			tpl_printf(vars, TPLADD, "SCRIPTRESULTOUT", "[Error]: Script \"%s\" not found!", scriptname);
+			tpl_printf(vars, TPLADD, "SCRIPTRESULTOUT", "[Error]: Script \"%s\" not found!", xml_encode(vars, scriptname));
 		}
 
 	}
@@ -7462,7 +7567,7 @@ static char *send_ncam_scanusb(struct templatevars * vars)
 	char path[1035];
 
 	fp = popen("lsusb -v | egrep '^Bus|^ *iSerial|^ *iProduct'", "r");
-	if(!fgets(path, sizeof(path) - 1, fp) || !fp)
+	if(!fp || !fgets(path, sizeof(path) - 1, fp))
 	{
 		tpl_addVar(vars, TPLADD, "USBENTRY", "<b>lsusb:</b> Failed to run or not installed!");
 		tpl_addVar(vars, TPLADD, "USBBIT", tpl_getTpl(vars, "SCANUSBBIT"));
@@ -7863,9 +7968,51 @@ static char *send_ncam_failban(struct templatevars * vars, struct uriparams * pa
 	set_null_ip(&ip2delete);
 	LL_ITER itr = ll_iter_create(cfg.v_list);
 	V_BAN *v_ban_entry;
-	//int8_t apicall = 0; //remove before flight
 
 	if(!apicall) { setActiveMenu(vars, MNU_FAILBAN); }
+
+	if(streq(getParam(params, "action"), "geoipdownload"))
+	{
+		char status[256];
+		if(ncam_country_download_db(status, sizeof(status)))
+		{
+			ncam_country_reload();
+			tpl_addMsg(vars, status);
+		}
+		else
+		{
+			tpl_addMsg(vars, status);
+		}
+	}
+	if(streq(getParam(params, "action"), "accesssave"))
+	{
+		config_set("failban", "failbantime", getParam(params, "failbantime"));
+		config_set("failban", "countryenabled", getParam(params, "countryenabled"));
+		config_set("failban", "failbancount", getParam(params, "failbancount"));
+		config_set("failban", "allowedcountries", getParam(params, "allowedcountries"));
+		config_set("failban", "countryexceptions", getParam(params, "countryexceptions"));
+		if(write_config() == 0)
+		{
+			ncam_country_reload();
+			tpl_addMsg(vars, "Country access policy was saved.");
+		}
+		else
+		{
+			tpl_addMsg(vars, "ERROR: Failed to write config file!!!");
+		}
+	}
+
+	tpl_printf(vars, TPLADD, "FAILBANTIME", "%d", cfg.failbantime);
+	tpl_printf(vars, TPLADD, "FAILBANCOUNT", "%d", cfg.failbancount);
+	tpl_addVar(vars, TPLADD, "COUNTRYACCESSON", cfg.http_country_enabled ? "selected" : "");
+	tpl_addVar(vars, TPLADD, "COUNTRYACCESSOFF", cfg.http_country_enabled ? "" : "selected");
+	tpl_addVar(vars, TPLADD, "ACCESSALLOWEDCOUNTRIES", cfg.http_allowed_countries);
+	char *access_exceptions = mk_t_iprange(cfg.http_country_exceptions);
+	tpl_addVar(vars, TPLADD, "ACCESSEXCEPTIONS", access_exceptions);
+	free_mk_t(access_exceptions);
+	char access_status[256];
+	ncam_country_status(access_status, sizeof(access_status));
+	tpl_addVar(vars, TPLADD, "ACCESSSTATUS", access_status);
 
 	if(strcmp(getParam(params, "action"), "delete") == 0)
 	{
@@ -7898,7 +8045,19 @@ static char *send_ncam_failban(struct templatevars * vars, struct uriparams * pa
 
 	while((v_ban_entry = ll_iter_next(&itr)))
 	{
-		tpl_printf(vars, TPLADD, "IPADDRESS", "%s@%d", cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port);
+		char country_code[NCAM_COUNTRY_CODE_STR_LEN];
+		char country_flag[16];
+		if(!ncam_country_lookup(v_ban_entry->v_ip, country_code))
+		{
+			cs_strncpy(country_code, "--", sizeof(country_code));
+		}
+		ncam_country_flag(country_code, country_flag, sizeof(country_flag));
+		tpl_addVar(vars, TPLADD, "COUNTRYNAME", ncam_country_name(country_code));
+		tpl_addVar(vars, TPLADD, "COUNTRYFLAG", country_flag);
+		if(v_ban_entry->v_port)
+			tpl_printf(vars, TPLADD, "IPADDRESS", "%s@%d", cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port);
+		else
+			tpl_addVar(vars, TPLADD, "IPADDRESS", cs_inet_ntoa(v_ban_entry->v_ip));
 		tpl_addVar(vars, TPLADD, "VIOLATIONUSER", v_ban_entry->info ? v_ban_entry->info : "unknown");
 		struct tm st ;
 		localtime_r(&v_ban_entry->v_time.time, &st); // fix me, we need walltime!
@@ -8849,11 +9008,13 @@ static char *send_ncam_api(struct templatevars * vars, FILE * f, struct uriparam
 
 				memset(cmd_pack, '0', sizeof(CMD_PACKET));
 				cmd_pack->client = webif_client;
-				cmd_pack->cmdlen = strlen(getParam(params, "cmd")) / 2;
+				size_t command_hex_len = strlen(getParam(params, "cmd"));
+				size_t command_len = command_hex_len / 2;
 
-				if(cmd_pack->cmdlen > 0 && abs(cmd_pack->cmdlen) <= sizeof(cmd_pack->cmd))
+				if(command_len > 0 && command_len <= sizeof(cmd_pack->cmd) && command_len <= INT16_MAX)
 				{
-					if(key_atob_l(getParam(params, "cmd"), cmd_pack->cmd, cmd_pack->cmdlen*2))
+					cmd_pack->cmdlen = (int16_t)command_len;
+					if(key_atob_l(getParam(params, "cmd"), cmd_pack->cmd, command_hex_len))
 					{
 						tpl_addVar(vars, TPLADD, "APIERRORMESSAGE", "'cmd' has not been sent due to wrong value!");
 						return tpl_getTpl(vars, "APIERROR");
@@ -8861,7 +9022,7 @@ static char *send_ncam_api(struct templatevars * vars, FILE * f, struct uriparam
 				}
 				else
 				{
-					if(cmd_pack->cmdlen)
+					if(command_hex_len)
 					{
 						snprintf(api_msg, sizeof(api_msg), "Command would exceed %lu bytes!", (long unsigned int)sizeof(cmd_pack->cmd));
 						tpl_addVar(vars, TPLADD, "APIERRORMESSAGE", api_msg);
@@ -9103,7 +9264,7 @@ static bool ghttp_autoconf(struct templatevars * vars, struct uriparams * params
 	while((rdr = ll_iter_next(&itr)))
 	{
 		if(rdr->ph.num == R_GHTTP)
-			{ restart_cardreader(rdr, 1); }
+			{ reader_set_enabled_async(rdr, rdr->enable); }
 	}
 	return true;
 }
@@ -9234,6 +9395,8 @@ static int8_t check_httpdyndns(IN_ADDR_T addr)
 
 static int8_t check_valid_origin(IN_ADDR_T addr)
 {
+	if(!ncam_country_access_allowed(addr))
+		{ return 0; }
 
 	// check whether requesting IP is in allowed IP ranges
 	if(check_ip(cfg.http_allowed, addr))
@@ -9249,30 +9412,107 @@ static int8_t check_valid_origin(IN_ADDR_T addr)
 	return 0;
 }
 
-static int8_t check_request(char *result, int32_t readen)
+static int8_t webif_origin_matches(const char *value, const char *host)
 {
-	if(readen < 50) { return 0; }
-	result[readen] = '\0';
-	int8_t method;
-	if(strncmp(result, "POST", 4) == 0) { method = 1; }
-	else { method = 0; }
-	char *headerEnd = strstr(result, "\r\n\r\n");
-	if(headerEnd == NULL) { return 0; }
-	else if(method == 0) { return 1; }
-	else
+	const char *scheme_end, *authority, *end;
+	char authority_host[512];
+	size_t len;
+	if(!value || !host || !*value || !*host) { return 0; }
+	scheme_end = strstr(value, "://");
+	if(!scheme_end) { return 0; }
+	if(ssl_active)
 	{
-		char *ptr = strstr(result, "Content-Length: ");
-		if(ptr != NULL)
-		{
-			ptr += 16;
-			if(ptr < result + readen)
-			{
-				uint32_t length = atoi(ptr);
-				if(cs_strlen(headerEnd + 4) >= length) { return 1; }
-			}
-		}
+		if(strncasecmp(value, "https", (size_t)(scheme_end - value)) != 0 || (size_t)(scheme_end - value) != 5) { return 0; }
 	}
+	else if(strncasecmp(value, "http", (size_t)(scheme_end - value)) != 0 || (size_t)(scheme_end - value) != 4)
+	{
+		return 0;
+	}
+	authority = scheme_end + 3;
+	end = strpbrk(authority, "/?#");
+	len = end ? (size_t)(end - authority) : cs_strlen(authority);
+	while(len > 0 && (authority[len - 1] == ' ' || authority[len - 1] == '\t')) { --len; }
+	if(len == 0 || len >= sizeof(authority_host)) { return 0; }
+	memcpy(authority_host, authority, len);
+	authority_host[len] = '\0';
+	return strcasecmp(authority_host, host) == 0;
+}
+
+static int8_t webif_is_loopback(IN_ADDR_T addr)
+{
+	const char *ip = cs_inet_ntoa(addr);
+	return streq(ip, "127.0.0.1") || streq(ip, "::1") || streq(ip, "0:0:0:0:0:0:0:1") || streq(ip, "::ffff:127.0.0.1");
+}
+
+static int8_t webif_request_mutates(const char *method, int32_t pgidx, const struct uriparams *params)
+{
+	const char *action = getParam((struct uriparams *)params, "action");
+	const char *scriptname = getParam((struct uriparams *)params, "scriptname");
+	if(!strcasecmp(method, "POST")) { return 1; }
+	if(strcasecmp(method, "GET") != 0) { return 1; }
+	if(action && action[0]) { return 1; }
+	if(pgidx == 12 && scriptname && scriptname[0]) { return 1; }
 	return 0;
+}
+
+static int8_t webif_csrf_ok(const char *method, int32_t pgidx, struct uriparams *params, const char *origin, const char *referer, const char *host, IN_ADDR_T addr)
+{
+	if(!webif_request_mutates(method, pgidx, params)) { return 1; }
+	if(origin && origin[0]) { return webif_origin_matches(origin, host); }
+	if(referer && referer[0]) { return webif_origin_matches(referer, host); }
+	return webif_is_loopback(addr);
+}
+
+static int8_t check_request(char *result, int32_t readen, int32_t max_request_size)
+{
+	char *headerEnd, *lineEnd, *methodEnd, *line, *headers;
+	uint64_t content_length = 0;
+	int8_t have_content_length = 0, is_get = 0, is_post = 0;
+	if(!result || readen < 16) { return 0; }
+	result[readen] = '\0';
+	headerEnd = strstr(result, "\r\n\r\n");
+	if(!headerEnd) { return 0; }
+	lineEnd = strstr(result, "\r\n");
+	if(!lineEnd || lineEnd >= headerEnd) { return -1; }
+	methodEnd = strchr(result, ' ');
+	if(!methodEnd || methodEnd > lineEnd || methodEnd == result) { return -1; }
+	if((methodEnd - result) == 3 && !strncasecmp(result, "GET", 3))
+		{ is_get = 1; }
+	else if((methodEnd - result) == 4 && !strncasecmp(result, "POST", 4))
+		{ is_post = 1; }
+	else
+		{ return -1; }
+	headers = lineEnd + 2;
+	for(line = headers; line < headerEnd; )
+	{
+		char *eol = strstr(line, "\r\n");
+		if(!eol || eol > headerEnd) { return -1; }
+		if(!strncasecmp(line, "Content-Length:", 15))
+		{
+			char *p = line + 15, *q;
+			while(p < eol && (*p == ' ' || *p == '\t')) { ++p; }
+			q = p;
+			while(q < eol && *q >= '0' && *q <= '9') { ++q; }
+			if(q == p || q != eol) { return -1; }
+			char saved = *q; *q = '\0';
+			unsigned long long v = strtoull(p, NULL, 10);
+			*q = saved;
+			if(v > (unsigned long long)max_request_size) { return -1; }
+			if(have_content_length && content_length != v) { return -1; }
+			content_length = v;
+			have_content_length = 1;
+		}
+		else if(!strncasecmp(line, "Transfer-Encoding:", 18))
+		{
+			return -1;
+		}
+		line = eol + 2;
+	}
+	if(is_get)
+		{ return !have_content_length || content_length == 0 ? 1 : -1; }
+	if(!is_post || !have_content_length) { return 1; }
+	size_t body_received = (size_t)(result + readen - (headerEnd + 4));
+	return body_received >= content_length ? 1 : 0;
 }
 
 static int32_t readRequest(FILE * f, IN_ADDR_T in, char **result, int8_t forcePlain)
@@ -9354,7 +9594,15 @@ static int32_t readRequest(FILE * f, IN_ADDR_T in, char **result, int8_t forcePl
 				{ continue; }
 		}
 #endif
-	} while (!check_request(*result, bufsize));
+		int8_t request_state = check_request(*result, bufsize, max_request_size);
+		if(request_state < 0)
+		{
+			send_error(f, 400, "Bad Request", NULL, "Malformed HTTP request.", 0);
+			NULLFREE(*result);
+			return -1;
+		}
+		if(request_state == 1) { break; }
+	} while(1);
 	return bufsize;
 }
 static int32_t process_request(FILE * f, IN_ADDR_T in)
@@ -9384,9 +9632,11 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 		}
 		int32_t authok = 0;
 		char expectednonce[(MD5_DIGEST_LENGTH * 2) + 1], opaque[(MD5_DIGEST_LENGTH * 2) + 1];
+		char auth_request_target[4097];
 		char authheadertmp[sizeof(AUTHREALM) + sizeof(expectednonce) + sizeof(opaque) + 100];
 
-		char *method, *path, *protocol, *str1, *saveptr1 = NULL, *authheader = NULL, *extraheader = NULL, *filebuf = NULL;
+		char *method, *path, *protocol, *str1, *saveptr1 = NULL, *extraheader = NULL, *filebuf = NULL;
+		char *origin_header = NULL, *referer_header = NULL, *host_header = NULL;
 		char *pch, *tmp, *buf, *nameInUrl, subdir[32];
 		/* List of possible pages */
 		char *pages[] =
@@ -9445,7 +9695,14 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 		{
 			if((path = strtok_r(NULL, " ", &saveptr1)) != NULL)
 			{
-				if((protocol = strtok_r(NULL, "\r", &saveptr1)) == NULL)
+				if(cs_strlen(path) > 4096)
+			{
+				send_error(f, 414, "URI Too Long", NULL, "Request target too long.", 0);
+				NULLFREE(filebuf);
+				return -1;
+			}
+			cs_strncpy(auth_request_target, path, sizeof(auth_request_target));
+			if((protocol = strtok_r(NULL, "\r", &saveptr1)) == NULL)
 				{
 					NULLFREE(filebuf);
 					return -1;
@@ -9535,14 +9792,24 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 				}
 				break;
 			}
-			if(!authok && len > 50 && strncasecmp(str1, "Authorization:", 14) == 0 && strstr(str1, "Digest") != NULL)
+			if(len > 7 && strncasecmp(str1, "Origin:", 7) == 0)
 			{
-				if(cs_dblevel & D_CLIENT)
-				{
-					if(cs_realloc(&authheader, len + 1))
-						{ cs_strncpy(authheader, str1, len); }
-				}
-				authok = check_auth(str1, method, path, addr, expectednonce, opaque);
+			origin_header = str1 + 7;
+				while(*origin_header == ' ' || *origin_header == '\t') { ++origin_header; }
+			}
+			else if(len > 8 && strncasecmp(str1, "Referer:", 8) == 0)
+			{
+				referer_header = str1 + 8;
+				while(*referer_header == ' ' || *referer_header == '\t') { ++referer_header; }
+			}
+			else if(len > 5 && strncasecmp(str1, "Host:", 5) == 0)
+			{
+				host_header = str1 + 5;
+				while(*host_header == ' ' || *host_header == '\t') { ++host_header; }
+			}
+			else if(!authok && len > 22 && strncasecmp(str1, "Authorization: Digest ", 22) == 0)
+			{
+				authok = check_auth(str1, method, auth_request_target, addr, expectednonce, opaque);
 			}
 			else if(len > 40 && strncasecmp(str1, "If-Modified-Since:", 18) == 0)
 			{
@@ -9564,16 +9831,7 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 			if(!authok || cs_strlen(opaque) != MD5_DIGEST_LENGTH * 2) { calculate_opaque(addr, opaque); }
 			if(authok != 2)
 			{
-				if(!authok)
-				{
-					if(authheader)
-					{
-						cs_log_dbg(D_CLIENT, "WebIf: Received wrong auth header from %s:", cs_inet_ntoa(addr));
-						cs_log_dbg(D_CLIENT, "%s", authheader);
-					}
-					else
-						{ cs_log_dbg(D_CLIENT, "WebIf: Received no auth header from %s.", cs_inet_ntoa(addr)); }
-				}
+				if(!authok) { cs_log_dbg(D_CLIENT, "WebIf: Received invalid or missing auth from %s.", cs_inet_ntoa(addr)); }
 				calculate_nonce(NULL, expectednonce, opaque);
 			}
 			if(authok != 1)
@@ -9589,13 +9847,18 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 				char *msg = "Access denied.\n";
 				send_headers(f, 401, "Unauthorized", extraheader, "text/html", 0, cs_strlen(msg), msg, 0);
 				webif_write(msg, f);
-				NULLFREE(authheader);
 				NULLFREE(filebuf);
 				if(*keepalive) { continue; }
 				else { return 0; }
 			}
 		}
-		else { NULLFREE(authheader); }
+
+		if(!webif_csrf_ok(method, pgidx, &params, origin_header, referer_header, host_header, addr))
+		{
+			send_error(f, 403, "Forbidden", NULL, "Invalid request origin.", 0);
+			NULLFREE(filebuf);
+			return -1;
+		}
 
 		/*build page*/
 		if(pgidx == 8)
@@ -9706,9 +9969,20 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 				tpl_addVar(vars, TPLADD, "APISTARTTIME", tbuffer);
 				tpl_printf(vars, TPLADD, "APIRUNTIME", "%" PRId64, (int64_t)now - first_client->login);
 				tpl_printf(vars, TPLADD, "APIREADONLY", "%d", cfg.http_readonly);
-				if(strcmp(getParam(&params, "callback"), ""))
+				const char *callback = getParam(&params, "callback");
+				int8_t valid_callback = 1;
+				if(callback && callback[0])
 				{
-					tpl_printf(vars, TPLADD, "CALLBACK", "%s%s", getParam(&params, "callback"), "(");
+					if(!((callback[0] >= 'A' && callback[0] <= 'Z') || (callback[0] >= 'a' && callback[0] <= 'z') || callback[0] == '_' || callback[0] == '$')) { valid_callback = 0; }
+					for(size_t ci = 1; valid_callback && callback[ci]; ++ci)
+					{
+						if(!((callback[ci] >= 'A' && callback[ci] <= 'Z') || (callback[ci] >= 'a' && callback[ci] <= 'z') || (callback[ci] >= '0' && callback[ci] <= '9') || callback[ci] == '_' || callback[ci] == '$')) { valid_callback = 0; }
+					}
+					if(cs_strlen(callback) > 128) { valid_callback = 0; }
+				}
+				if(valid_callback && callback && callback[0])
+				{
+					tpl_printf(vars, TPLADD, "CALLBACK", "%s(", callback);
 					tpl_addVar(vars, TPLADD, "ENDBRACKET", ")");
 				}
 
@@ -9735,8 +10009,21 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 
 			char *result = NULL;
 
-			// WebIf allows modifying many things. Thus, all pages except images/css/static are expected to be non-threadsafe!
-			if(pgidx != 19 && pgidx != 20 && pgidx != 21 && pgidx != 27) { cs_writelock(__func__, &http_lock); }
+			// Keep read-only GET requests concurrent; mutations remain serialized.
+			int8_t webif_write_locked = 0;
+			if(pgidx != 19 && pgidx != 20 && pgidx != 21 && pgidx != 27)
+			{
+				const char *action = getParam(&params, "action");
+				if(strcmp(method, "GET") != 0 || (action && action[0] != '\0'))
+				{
+					cs_writelock(__func__, &http_lock);
+					webif_write_locked = 1;
+				}
+				else
+				{
+					cs_readlock(__func__, &http_lock);
+				}
+			}
 			switch(pgidx)
 			{
 			case 0:
@@ -9837,7 +10124,11 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 				result = send_ncam_status(vars, &params, 0);
 				break;
 			}
-			if(pgidx != 19 && pgidx != 20 && pgidx != 21 && pgidx != 27) { cs_writeunlock(__func__, &http_lock); }
+			if(pgidx != 19 && pgidx != 20 && pgidx != 21 && pgidx != 27)
+			{
+				if(webif_write_locked) { cs_writeunlock(__func__, &http_lock); }
+				else { cs_readunlock(__func__, &http_lock); }
+			}
 
 			if(result == NULL || !strcmp(result, "0") || cs_strlen(result) == 0) { send_error500(f); }
 			else if(strcmp(result, "1"))
@@ -9888,36 +10179,36 @@ static void *serve_process(void *conn)
 	{
 		if(SSL_set_fd(ssl, s))
 		{
-			int32_t ok = (SSL_accept(ssl) != -1);
-			if(!ok)
+			int32_t ssl_rc = SSL_accept(ssl);
+			int32_t ok = (ssl_rc == 1);
+			int8_t handshake_timed_out = 0;
+			int8_t tries = 100; // 100 x 100 ms = 10 seconds total
+			while(!ok && tries-- > 0)
 			{
-				int8_t tries = 100;
-				while(!ok && tries--)
+				int32_t err = SSL_get_error(ssl, ssl_rc);
+				if(err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
+					{ break; }
+				struct pollfd pfd;
+				pfd.fd = s;
+				pfd.events = (err == SSL_ERROR_WANT_WRITE) ? POLLOUT : (POLLIN | POLLPRI);
+				pfd.revents = 0;
+				int32_t rc = poll(&pfd, 1, 100);
+				if(rc < 0)
 				{
-					int32_t err = SSL_get_error(ssl, -1);
-					if(err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE)
-						{ break; }
-					else
-					{
-						struct pollfd pfd;
-						pfd.fd = s;
-						pfd.events = POLLIN | POLLPRI;
-						int32_t rc = poll(&pfd, 1, -1);
-						if(rc < 0)
-						{
-							if(errno == EINTR || errno == EAGAIN) { continue; }
-							break;
-						}
-						if(rc == 1)
-							{ ok = (SSL_accept(ssl) != -1); }
-					}
+					if(errno == EINTR || errno == EAGAIN) { continue; }
+					break;
 				}
+				if(rc == 0) { continue; }
+				if(pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) { break; }
+				ssl_rc = SSL_accept(ssl);
+				ok = (ssl_rc == 1);
 			}
+			if(!ok && tries <= 0) { handshake_timed_out = 1; }
 			if(ok)
 			{
 				process_request((FILE *)ssl, in);
 			}
-			else
+			else if(!handshake_timed_out)
 			{
 				FILE *f;
 				f = fdopen(s, "r+");
@@ -9939,9 +10230,22 @@ static void *serve_process(void *conn)
 					}
 					if(host)
 					{
-						char extra[cs_strlen(host) + 20];
-						snprintf(extra, sizeof(extra), "Location: https://%s", host);
-						send_error(f, 301, "Moved Permanently", extra, "This web server is running in SSL mode.", 1);
+						int8_t valid_host = cs_strlen(host) > 0 && cs_strlen(host) < 512;
+						for(size_t hi = 0; valid_host && host[hi]; ++hi)
+						{
+							unsigned char hc = (unsigned char)host[hi];
+							if(!(isalnum(hc) || hc == '.' || hc == ':' || hc == '[' || hc == ']' || hc == '-')) { valid_host = 0; }
+						}
+						if(valid_host)
+						{
+							char extra[532];
+							snprintf(extra, sizeof(extra), "Location: https://%s", host);
+							send_error(f, 301, "Moved Permanently", extra, "This web server is running in SSL mode.", 1);
+						}
+						else
+						{
+							send_error(f, 400, "Bad Request", NULL, "Invalid Host header.", 1);
+						}
 					}
 					else
 						{ send_error(f, 200, "Bad Request", NULL, "This web server is running in SSL mode.", 1); }
@@ -9979,6 +10283,10 @@ static void *serve_process(void *conn)
 		close(s);
 	}
 
+	SAFE_MUTEX_LOCK(&webif_worker_mutex);
+	if(webif_worker_count > 0) { webif_worker_count--; }
+	if(webif_worker_count == 0) { pthread_cond_broadcast(&webif_worker_cond); }
+	SAFE_MUTEX_UNLOCK(&webif_worker_mutex);
 	return NULL;
 }
 
@@ -10147,6 +10455,11 @@ static void *http_server(void *UNUSED(d))
 		else
 		{
 			getpeername(s, (struct sockaddr *) &remote, &len);
+			if(!ncam_country_access_allowed(SIN_GET_ADDR(remote)) || cs_check_violation(SIN_GET_ADDR(remote), cfg.http_port))
+			{
+				close(s);
+				continue;
+			}
 			if(!cs_malloc(&conn, sizeof(struct s_connection)))
 			{
 				close(s);
@@ -10189,15 +10502,40 @@ static void *http_server(void *UNUSED(d))
 			}
 #endif
 
+			SAFE_MUTEX_LOCK(&webif_worker_mutex);
+			if(webif_worker_count >= WEBIF_MAX_WORKERS)
+			{
+				SAFE_MUTEX_UNLOCK(&webif_worker_mutex);
+				cs_log_dbg(D_TRACE, "WebIf: worker limit reached for %s", cs_inet_ntoa(SIN_GET_ADDR(remote)));
+				close(s);
+#ifdef WITH_SSL
+				if(conn->ssl) { SSL_free(conn->ssl); conn->ssl = NULL; }
+#endif
+				NULLFREE(conn);
+				continue;
+			}
+			webif_worker_count++;
+			SAFE_MUTEX_UNLOCK(&webif_worker_mutex);
 			int32_t ret = start_thread("webif workthread", serve_process, (void *)conn, NULL, 1, 1);
 			if(ret)
 			{
+				SAFE_MUTEX_LOCK(&webif_worker_mutex);
+				if(webif_worker_count > 0) { webif_worker_count--; }
+				if(webif_worker_count == 0) { pthread_cond_broadcast(&webif_worker_cond); }
+				SAFE_MUTEX_UNLOCK(&webif_worker_mutex);
 				NULLFREE(conn);
 			}
 		}
 	}
-	// Wait a bit so that we don't close ressources while http threads are active
-	cs_sleepms(300);
+	// Do not release SSL/WebIf resources while detached workers still use them.
+	while(1)
+	{
+		SAFE_MUTEX_LOCK(&webif_worker_mutex);
+		uint32_t workers = webif_worker_count;
+		SAFE_MUTEX_UNLOCK(&webif_worker_mutex);
+		if(workers == 0) { break; }
+		cs_sleepms(10);
+	}
 #ifdef WITH_SSL
 	SSL_CTX_free(ctx);
 	CRYPTO_set_dynlock_create_callback(NULL);

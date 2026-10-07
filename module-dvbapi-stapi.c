@@ -109,20 +109,24 @@ static void stapi_off(void)
 
 	for(i = 0; i < PTINUM; i++)
 	{
-		if(dev_list[i].SessionHandle > 0)
+		if(dev_list[i].SessionHandle > 0 && dev_list[i].SignalHandle > 0)
 		{
-			if(dev_list[i].SignalHandle > 0)
-			{
-				oscam_stapi_SignalAbort(dev_list[i].SignalHandle);
-			}
-#ifndef WITH_WI
-			pthread_cancel(dev_list[i].thread);
-#endif
+			oscam_stapi_SignalAbort(dev_list[i].SignalHandle);
 		}
 	}
 
 	SAFE_MUTEX_UNLOCK(&filter_lock);
-	sleep(2);
+
+#ifndef WITH_WI
+	for(i = 0; i < PTINUM; i++)
+	{
+		if(dev_list[i].SessionHandle > 0)
+		{
+			pthread_cancel(dev_list[i].thread);
+			pthread_join(dev_list[i].thread, NULL);
+		}
+	}
+#endif
 	return;
 }
 
@@ -254,13 +258,18 @@ int32_t stapi_open(void)
 
 		struct read_thread_param *para;
 		if(!cs_malloc(&para, sizeof(struct read_thread_param)))
-			{ return 0; }
+		{
+			stapi_off();
+			return 0;
+		}
 		para->id = i;
 		para->cli = cur_client();
 
 		int32_t ret = start_thread("stapi read", stapi_read_thread, (void *)para, &dev_list[i].thread, 1, 0);
 		if(ret)
 		{
+			NULLFREE(para);
+			stapi_off();
 			return 0;
 		}
 	}
@@ -656,16 +665,19 @@ static void *stapi_read_thread(void *sparam)
 
 	struct read_thread_param *para = sparam;
 	dev_index = para->id;
+	struct s_client *client = para->cli;
+	NULLFREE(para);
 
-	SAFE_SETSPECIFIC(getclient, para->cli);
+	SAFE_SETSPECIFIC(getclient, client);
 #ifndef WITH_WI
-	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+	pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
 	int32_t error_count = 0;
 #endif
 	pthread_cleanup_push(stapi_cleanup_thread, (void *) dev_index);
 
 	while(!exit_oscam)
 	{
+		pthread_testcancel();
 		QueryBufferHandle = 0;
 #ifndef WITH_WI
 		ErrorCode = oscam_stapi_SignalWaitBuffer(dev_list[dev_index].SignalHandle, &QueryBufferHandle, 1000);

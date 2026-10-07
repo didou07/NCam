@@ -141,6 +141,7 @@ static int32_t csp_recv(struct s_client *client, uint8_t *buf, int32_t l)
 	}
 	//cs_log_dump_dbg(D_TRACE, buf, rs, "received %d bytes from csp", rs);
 
+	if(rs < 1) { return -1; }
 	uint8_t type = buf[0]; // TYPE
 
 	switch(type)
@@ -163,10 +164,12 @@ static int32_t csp_recv(struct s_client *client, uint8_t *buf, int32_t l)
 				uint8_t orgname[32] = {0};
 				if(rs >= 31)
 				{
-					// origin connector name included
 					uint16_t namelen = (buf[29] << 8) | buf[30];
-					if(namelen > sizeof(orgname)) { namelen = sizeof(orgname); }
+					size_t available = (size_t)rs - 31;
+					if(namelen >= sizeof(orgname)) { namelen = sizeof(orgname) - 1; }
+					if(namelen > available) { namelen = (uint16_t)available; }
 					memcpy(orgname, buf + 31, namelen);
+					orgname[namelen] = '\0';
 				}
 				cs_log_dump_dbg(D_TRACE, er->cw, sizeof(er->cw), "received cw from csp onid=%04X caid=%04X srvid=%04X hash=%08X (org connector: %s, tags: %02X/%02X)", er->onid, er->caid, er->srvid, er->csp_hash, orgname, commandTag, rplTag);
 				cacheex_add_to_cache_from_csp(client, er);

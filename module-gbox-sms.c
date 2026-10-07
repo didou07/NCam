@@ -61,7 +61,7 @@ static int32_t poll_gsms_data(uint16_t *boxid, uint8_t *num, char *text)
 	}
 
 	cs_log_dbg(D_READER, "total msg length taken from %s = %d, limited to %d", fname, length1, length);
-	cs_strncpy(text, buffer + 7, sizeof(buffer));
+	cs_strncpy(text, buffer + 7, GBOX_MAX_MSG_TXT + 1);
 
 	return 0;
 }

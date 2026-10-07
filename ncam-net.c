@@ -3,6 +3,7 @@
 #include "globals.h"
 #include "ncam-client.h"
 #include "ncam-failban.h"
+#include "ncam-country.h"
 #include "ncam-lock.h"
 #include "ncam-net.h"
 #include "ncam-string.h"
@@ -699,6 +700,12 @@ int32_t accept_connection(struct s_module *module, int8_t module_idx, int8_t por
 			buf[0] = 'U';
 			memcpy(buf + 1, &rl, 2);
 
+			if(!ncam_country_access_allowed(SIN_GET_ADDR(cad)))
+			{
+				NULLFREE(buf);
+				return 0;
+			}
+
 			if(cs_check_violation(SIN_GET_ADDR(cad), port->s_port))
 			{
 				NULLFREE(buf);
@@ -736,6 +743,12 @@ int32_t accept_connection(struct s_module *module, int8_t module_idx, int8_t por
 		int32_t pfd3;
 		if((pfd3 = accept(port->fd, (struct sockaddr *)&cad, (socklen_t *)&scad)) > 0)
 		{
+
+			if(!ncam_country_access_allowed(SIN_GET_ADDR(cad)))
+			{
+				close(pfd3);
+				return 0;
+			}
 
 			if(cs_check_violation(SIN_GET_ADDR(cad), port->s_port))
 			{
@@ -941,41 +954,3 @@ int32_t start_listener(struct s_module *module, struct s_port *port)
 	return port->fd;
 }
 
-#ifdef __CYGWIN__
-/**
- * Workaround missing MSG_WAITALL implementation under Cygwin.
- */
-ssize_t cygwin_recv(int sock, void *buf, int count, int tflags)
-{
-		char *bp = buf;
-		int n = 0;
-
-		if ((n = recv(sock, bp, count, tflags)) < 0)
-		{
-			return(n);
-		}
-
-		if (n < count && (tflags & MSG_WAITALL))
-		{
-			cs_log_dbg(D_TRACE, "Cygwin socket read retry. Got %d expected %d", n, count);
-
-			int n2 = recv(sock, bp + n, count - n, tflags);
-			if (n2 < 0 || n + n2 != count)
-			{
-				cs_log_dbg(D_TRACE, "Cygwin socket read retry failed. Got %d", n2);
-				if (n2 < 0)
-				{
-					return(n2);
-				}
-			}
-			else
-			{
-				cs_log_dbg(D_TRACE, "Cygwin socket read retry success. Got %d - Total: %d", n2, n + n2);
-			}
-
-			n+= n2;
-		}
-
-		return n;
-}
-#endif /* __CYGWIN__ */

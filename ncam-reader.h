@@ -27,6 +27,7 @@ void cs_card_info(void);
 int32_t reader_init(struct s_reader *reader);
 void remove_reader_from_active(struct s_reader *rdr);
 int32_t restart_cardreader(struct s_reader *rdr, int32_t restart);
+int32_t reader_set_enabled_async(struct s_reader *rdr, int8_t enable);
 void init_cardreader(void);
 void kill_all_readers(void);
 

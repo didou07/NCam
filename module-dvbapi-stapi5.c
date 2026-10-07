@@ -118,18 +118,22 @@ static void stapi_off(void)
 
 	for(i = 0; i < PTINUM; i++)
 	{
-		if(dev_list[i].SessionHandle > 0)
+		if(dev_list[i].SessionHandle > 0 && dev_list[i].SignalHandle > 0)
 		{
-			if(dev_list[i].SignalHandle > 0)
-			{
-				oscam_stapi5_SignalAbort(dev_list[i].SignalHandle);
-			}
-			pthread_cancel(dev_list[i].thread);
+			oscam_stapi5_SignalAbort(dev_list[i].SignalHandle);
 		}
 	}
 
 	SAFE_MUTEX_UNLOCK(&filter_lock);
-	sleep(2);
+
+	for(i = 0; i < PTINUM; i++)
+	{
+		if(dev_list[i].SessionHandle > 0)
+		{
+			pthread_cancel(dev_list[i].thread);
+			pthread_join(dev_list[i].thread, NULL);
+		}
+	}
 	return;
 }
 
@@ -166,26 +170,21 @@ int32_t stapi_open(void)
 	oscam_sttkd_GetRevision();
 
 	n = scandir(PROCDIR, &entries, NULL, NULL);
-	if (n==-1)
+	if (n == -1)
 	{
 		cs_log("scandir failed (errno=%d %s)", errno, strerror(errno));
 		return 0;
 	}
-	while(n--)
+	for(int idx = 0; idx < n; ++idx)
 	{
-		char pfad[cs_strlen(PROCDIR) + cs_strlen(entries[i]->d_name) + 1];
-		snprintf(pfad, sizeof(pfad), "%s%s", PROCDIR, entries[i]->d_name);
+		struct dirent *entry = entries[idx];
+		char pfad[cs_strlen(PROCDIR) + cs_strlen(entry->d_name) + 1];
+		snprintf(pfad, sizeof(pfad), "%s%s", PROCDIR, entry->d_name);
 
 		struct stat buf;
-		if (stat(pfad, &buf) != 0)
+		if(stat(pfad, &buf) != 0 || !(buf.st_mode & S_IFDIR) || entry->d_name[0] == '.')
 		{
-			free(entries[n]);
-			continue;
-		}
-
-		if (!(buf.st_mode & S_IFDIR && strncmp(entries[i]->d_name, ".", 1) != 0))
-		{
-			free(entries[n]);
+			free(entry);
 			continue;
 		}
 
@@ -193,42 +192,38 @@ int32_t stapi_open(void)
 		struct s_dvbapi_priority *p;
 		for(p = dvbapi_priority; p != NULL; p = p->next)
 		{
-			if(p->type != 's') { continue; }
-			if(strcmp(entries[n]->d_name, p->devname) == 0)
+			if(p->type == 's' && strcmp(entry->d_name, p->devname) == 0)
 			{
 				do_open = 1;
 				break;
 			}
 		}
 
-		if(!do_open)
+		if(!do_open || i >= PTINUM)
 		{
-			cs_log("PTI: %s skipped", entries[n]->d_name);
-			free(entries[n]);
+			if(do_open && i >= PTINUM) { cs_log("PTI: %s skipped, device limit reached", entry->d_name); }
+			else { cs_log("PTI: %s skipped", entry->d_name); }
+			free(entry);
 			continue;
 		}
 
-		ErrorCode = oscam_stapi5_Open(entries[n]->d_name, &dev_list[i].SessionHandle);
+		ErrorCode = oscam_stapi5_Open(entry->d_name, &dev_list[i].SessionHandle);
 		if(ErrorCode != 0)
 		{
 			cs_log("STPTI_Open ErrorCode: %d", ErrorCode);
-			free(entries[n]);
+			free(entry);
 			continue;
 		}
 
-		//debug
-		//oscam_stapi_Capability(entries[n]->d_name);
-
-		cs_strncpy(dev_list[i].name, entries[n]->d_name, sizeof(dev_list[i].name));
-		cs_log("PTI: %s open %d", entries[n]->d_name, i);
-		free(entries[n]);
+		cs_strncpy(dev_list[i].name, entry->d_name, sizeof(dev_list[i].name));
+		cs_log("PTI: %s open %d", entry->d_name, i);
+		free(entry);
 
 		ErrorCode = oscam_stapi5_SignalAllocate(dev_list[i].SessionHandle, &dev_list[i].SignalHandle);
 		if(ErrorCode != 0)
 			{ cs_log("SignalAllocate: ErrorCode: %d SignalHandle: %x", ErrorCode, dev_list[i].SignalHandle); }
 
-		i++;
-		if(i >= PTINUM) { break; }
+		++i;
 	}
 	free(entries);
 
@@ -256,13 +251,18 @@ int32_t stapi_open(void)
 
 		struct read_thread_param *para;
 		if(!cs_malloc(&para, sizeof(struct read_thread_param)))
-			{ return 0; }
+		{
+			stapi_off();
+			return 0;
+		}
 		para->id = i;
 		para->cli = cur_client();
 
 		int32_t ret = start_thread("stapi read", stapi_read_thread, (void *)para, &dev_list[i].thread, 1, 0);
 		if(ret)
 		{
+			NULLFREE(para);
+			stapi_off();
 			return 0;
 		}
 	}
@@ -520,15 +520,18 @@ static void *stapi_read_thread(void *sparam)
 
 	struct read_thread_param *para = sparam;
 	dev_index = para->id;
+	struct s_client *client = para->cli;
+	NULLFREE(para);
 
-	SAFE_SETSPECIFIC(getclient, para->cli);
-	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+	SAFE_SETSPECIFIC(getclient, client);
+	pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
 	pthread_cleanup_push(stapi_cleanup_thread, (void *) dev_index);
 
 	int32_t error_count = 0;
 
 	while(!exit_oscam)
 	{
+		pthread_testcancel();
 		QueryBufferHandle = 0;
 		ErrorCode = oscam_stapi5_SignalWaitBuffer(dev_list[dev_index].SignalHandle, &QueryBufferHandle, 1000);
 

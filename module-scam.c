@@ -161,17 +161,29 @@ static void scam_decode_length(uint8_t *packet, uint32_t *dataLength, uint32_t *
 	}
 }
 
-static uint32_t scam_get_length_data_length(uint8_t *packet)
+static int8_t scam_next_field(const uint8_t *buf, uint32_t len, uint32_t pos, uint8_t *tag, uint32_t *dataLength, uint32_t *dataOffset)
 {
-	if(packet[1] & 0x80)
+	uint32_t i, n, length, offset = 2;
+	if(!buf || !tag || !dataLength || !dataOffset || pos >= len || len - pos < 2)
+		{ return 0; }
+	if(buf[pos + 1] & 0x80)
 	{
-		return packet[1] & ~0x80;
+		n = buf[pos + 1] & 0x7F;
+		if(n == 0 || n > 4 || len - pos < 2 + n) { return 0; }
+		length = 0;
+		for(i = 0; i < n; ++i)
+			{ length = (length << 8) | buf[pos + 2 + i]; }
+		offset += n;
 	}
 	else
-	{
-		return 1;
-	}
+		{ length = buf[pos + 1]; }
+	if(length > len - pos - offset) { return 0; }
+	*tag = buf[pos];
+	*dataLength = length;
+	*dataOffset = offset;
+	return 1;
 }
+
 
 static void scam_encode_length(uint32_t len, uint8_t *data, uint8_t *dataLen)
 {
@@ -464,47 +476,31 @@ static void scam_client_recv_caid(uint8_t *buf, uint32_t len)
 static void scam_client_recv_server_version(uint8_t *buf, uint32_t len)
 {
 	uint32_t pos = 0, dataLength = 0, dataOffset = 0, usedLen = 0;
+	uint8_t tag;
 	char versionString[128];
 	uint16_t versionShort = 0;
 	versionString[0] = 0;
 
-	scam_decode_length(buf, &dataLength, &dataOffset);
-
-	while(pos + dataOffset + dataLength - 1 < len)
+	while(scam_next_field(buf, len, pos, &tag, &dataLength, &dataOffset))
 	{
-		switch(buf[pos])
+		switch(tag)
 		{
-			case 0x01: // version string
-				usedLen = dataLength;
-				if(usedLen > 127)
-				{
-					usedLen = 127;
-				}
-				memcpy(versionString, buf + dataOffset, usedLen);
+			case 0x01:
+				usedLen = dataLength > 127 ? 127 : dataLength;
+				memcpy(versionString, buf + pos + dataOffset, usedLen);
 				versionString[usedLen] = 0;
 				break;
-
-			case 0x0A: // version short
-				if(dataLength != 2) break;
-				versionShort = (buf[pos + dataOffset] << 8) | buf[pos + dataOffset + 1];
+			case 0x0A:
+				if(dataLength == 2)
+					{ versionShort = (buf[pos + dataOffset] << 8) | buf[pos + dataOffset + 1]; }
 				break;
-
 			default:
-				cs_log_dbg(D_READER, "unknown server version packet tag %X", buf[pos]);
+				cs_log_dbg(D_READER, "unknown server version packet tag %X", tag);
 				break;
 		}
-
 		pos += dataOffset + dataLength;
-		if((pos + 2 < len) && (pos + 1 + scam_get_length_data_length(buf + pos)) < len)
-		{
-			scam_decode_length(buf + pos, &dataLength, &dataOffset);
-		}
-		else
-		{
-			break;
-		}
 	}
-
+	if(pos != len) { cs_log_dbg(D_READER, "invalid scam server version packet"); }
 	cs_log("scam server version: %s (%d)", versionString, versionShort);
 }
 
@@ -675,6 +671,7 @@ static int32_t scam_client_init(struct s_client *cl)
 static int32_t scam_client_handle(struct s_client *cl, uint8_t *dcw, int32_t *rc, uint8_t *buf, int32_t n)
 {
 	uint32_t pos = 0, packetLength = 0, packetOffset = 0, dataLength = 0, dataOffset = 0;
+	uint8_t tag;
 	int32_t ret = -1;
 
 	if(n < 3)
@@ -683,20 +680,13 @@ static int32_t scam_client_handle(struct s_client *cl, uint8_t *dcw, int32_t *rc
 	}
 
 	scam_decode_length(buf, &packetLength, &packetOffset);
-	pos += packetOffset;
+	if(packetOffset > (uint32_t)n || packetLength > (uint32_t)n - packetOffset) { return (-1); }
+	pos = packetOffset;
+	uint32_t packetEnd = packetOffset + packetLength;
 
-	if((pos + 2 < (uint32_t)n) && (pos + 1 + scam_get_length_data_length(buf + pos) < (uint32_t)n))
+	while(scam_next_field(buf, packetEnd, pos, &tag, &dataLength, &dataOffset))
 	{
-		scam_decode_length(buf + pos, &dataLength, &dataOffset);
-	}
-	else
-	{
-		return (-1);
-	}
-
-	while(pos + dataOffset + dataLength - 1 < (uint32_t)n)
-	{
-		switch(buf[pos])
+		switch(tag)
 		{
 			case 0x10: // checksum
 				if(dataLength != 2) { break; }
@@ -728,15 +718,8 @@ static int32_t scam_client_handle(struct s_client *cl, uint8_t *dcw, int32_t *rc
 		}
 
 		pos += dataOffset + dataLength;
-		if((pos + 2 < (uint32_t)n) && (pos + 1 + scam_get_length_data_length(buf + pos) < (uint32_t)n))
-		{
-			scam_decode_length(buf + pos, &dataLength, &dataOffset);
-		}
-		else
-		{
-			break;
-		}
 	}
+	if(pos != packetEnd) { return (-1); }
 
 	return ret;
 }
@@ -781,10 +764,11 @@ static void scam_server_init(struct s_client *cl)
 static void scam_server_recv_ecm(struct s_client *cl, uint8_t *buf, int32_t len)
 {
 	uint32_t pos = 0, dataLength = 0, dataOffset = 0, usedLen = 0;
+	uint8_t tag;
 	ECM_REQUEST *er;
 	uint8_t gotCaid = 0, gotEcm = 0;
 
-	if(len < 1)
+	if(len < 2)
 	{
 		return;
 	}
@@ -792,11 +776,9 @@ static void scam_server_recv_ecm(struct s_client *cl, uint8_t *buf, int32_t len)
 	if(!(er = get_ecmtask()))
 		{ return; }
 
-	scam_decode_length(buf, &dataLength, &dataOffset);
-
-	while(pos + dataOffset + dataLength - 1 < (uint32_t)len)
+	while(scam_next_field(buf, (uint32_t)len, pos, &tag, &dataLength, &dataOffset))
 	{
-		switch(buf[pos]) {
+		switch(tag) {
 
 			case 0x31: // channel data
 				if(dataLength != 0x0A) break;
@@ -835,14 +817,13 @@ static void scam_server_recv_ecm(struct s_client *cl, uint8_t *buf, int32_t len)
 		}
 
 		pos += dataOffset + dataLength;
-		if((pos + 2 < (uint32_t)len) && (pos + 1 + scam_get_length_data_length(buf + pos) < (uint32_t)len))
-		{
-			scam_decode_length(buf + pos, &dataLength, &dataOffset);
-		}
-		else
-		{
-			break;
-		}
+	}
+
+	if(pos != (uint32_t)len)
+	{
+		NULLFREE(er);
+		cs_log("WARNING: ECM-request corrupt");
+		return;
 	}
 
 	if(gotCaid && gotEcm)
@@ -945,23 +926,21 @@ static void scam_server_send_serverversion(struct s_client *cl)
 static void scam_server_recv_auth(struct s_client *cl, uint8_t *buf, int32_t len)
 {
 	uint32_t pos = 0, dataLength = 0, dataOffset = 0, usedLen = 0;
-	uint8_t userok = 0;
+	uint8_t tag, userok = 0;
 	struct s_auth *account;
 	struct scam_data *scam = cl->scam;
 
 	if(scam == NULL) { return; }
 	scam->login_username[0] = 0;
 
-	if(len < 1)
+	if(len < 2)
 	{
 		return;
 	}
 
-	scam_decode_length(buf, &dataLength, &dataOffset);
-
-	while(pos + dataOffset + dataLength - 1 < (uint32_t)len)
+	while(scam_next_field(buf, (uint32_t)len, pos, &tag, &dataLength, &dataOffset))
 	{
-		switch(buf[pos])
+		switch(tag)
 		{
 			case 0xA0: // version short
 				if(dataLength != 2) break;
@@ -983,14 +962,6 @@ static void scam_server_recv_auth(struct s_client *cl, uint8_t *buf, int32_t len
 		}
 
 		pos += dataOffset + dataLength;
-		if((pos + 2 < (uint32_t)len) && (pos + 1 + scam_get_length_data_length(buf + pos) < (uint32_t)len))
-		{
-			scam_decode_length(buf + pos, &dataLength, &dataOffset);
-		}
-		else
-		{
-			break;
-		}
 	}
 
 	for(account = cfg.account; account; account = account->next)
@@ -1048,6 +1019,7 @@ static void scam_server_send_dcw(struct s_client *cl, ECM_REQUEST *er)
 static void *scam_server_handle(struct s_client *cl, uint8_t *buf, int32_t n)
 {
 	uint32_t pos = 0, packetLength = 0, packetOffset = 0, dataLength = 0, dataOffset = 0;
+	uint8_t tag;
 	struct s_auth *account;
 	struct scam_data *scam;
 
@@ -1077,7 +1049,10 @@ static void *scam_server_handle(struct s_client *cl, uint8_t *buf, int32_t n)
 	}
 
 	scam_decode_length(buf, &packetLength, &packetOffset);
-	pos += packetOffset;
+	if(packetOffset > (uint32_t)n || packetLength > (uint32_t)n - packetOffset)
+		{ return NULL; }
+	pos = packetOffset;
+	uint32_t packetEnd = packetOffset + packetLength;
 
 	if(scam->login_pending && packetLength > 1 && (buf[pos] != 0x10 || buf[pos + 1] != 0x02))
 	{
@@ -1087,18 +1062,9 @@ static void *scam_server_handle(struct s_client *cl, uint8_t *buf, int32_t n)
 		return NULL;
 	}
 
-	if((pos + 2 < (uint32_t)n) && (pos + 1 + scam_get_length_data_length(buf + pos) < (uint32_t)n))
+	while(scam_next_field(buf, packetEnd, pos, &tag, &dataLength, &dataOffset))
 	{
-		scam_decode_length(buf + pos, &dataLength, &dataOffset);
-	}
-	else
-	{
-		return NULL;
-	}
-
-	while(pos + dataOffset + dataLength - 1 < (uint32_t)n)
-	{
-		switch(buf[pos])
+		switch(tag)
 		{
 			case 0x10: // checksum
 				if(dataLength != 2) { break; }
@@ -1152,15 +1118,8 @@ static void *scam_server_handle(struct s_client *cl, uint8_t *buf, int32_t n)
 		}
 
 		pos += dataOffset + dataLength;
-		if((pos + 2 < (uint32_t)n) && (pos + 1 + scam_get_length_data_length(buf + pos) < (uint32_t)n))
-		{
-			scam_decode_length(buf + pos, &dataLength, &dataOffset);
-		}
-		else
-		{
-			break;
-		}
 	}
+	if(pos != packetEnd) { return NULL; }
 
 	return NULL;
 }

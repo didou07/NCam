@@ -24,8 +24,8 @@ static int32_t card_added_count;
 static int32_t card_removed_count;
 static int32_t card_dup_count;
 static pthread_t share_updater_thread;
-static bool share_updater_thread_active;
-static bool share_updater_refresh;
+static volatile bool share_updater_thread_active;
+static volatile bool share_updater_refresh;
 
 int32_t card_valid_for_client(struct s_client *cl, struct cc_card *card);
 
@@ -1703,7 +1703,7 @@ void cccam_init_share(void)
 	share_updater_refresh = 0;
 
 	pthread_t temp;
-	int32_t ret = start_thread("share updater", (void *)&share_updater, NULL, &temp, 1, 1);
+	int32_t ret = start_thread("share updater", (void *)&share_updater, NULL, &temp, 0, 1);
 	if(!ret)
 	{
 		share_updater_thread = temp;
@@ -1715,6 +1715,8 @@ void cccam_done_share(void)
 	if(share_updater_thread)
 	{
 		share_updater_thread_active = 0;
+		share_updater_refresh = 0;
+		SAFE_THREAD_JOIN(share_updater_thread, NULL);
 		share_updater_thread = 0;
 	}
 }

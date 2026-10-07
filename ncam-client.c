@@ -392,7 +392,7 @@ int32_t cs_auth_client(struct s_client *client, struct s_auth *account, const ch
 	memset(&client->grp, 0xff, sizeof(client->grp));
 	if((intptr_t)account != 0 && (intptr_t)account != -1 && account->disabled)
 	{
-		cs_add_violation(client, account->usr);
+		cs_add_auth_violation(client, account->usr);
 		cs_log("%s %s-client %s%s (%s%sdisabled account)",
 				client->crypted ? t_crypt : t_plain,
 				module->desc,
@@ -407,7 +407,7 @@ int32_t cs_auth_client(struct s_client *client, struct s_auth *account, const ch
 	if((intptr_t)account != 0 && (intptr_t)account != -1 && (intptr_t)account->allowedprotocols &&
 			(((intptr_t)account->allowedprotocols & module->listenertype) != module->listenertype))
 	{
-		cs_add_violation(client, account->usr);
+		cs_add_auth_violation(client, account->usr);
 		cs_log("%s %s-client %s%s (%s%sprotocol not allowed)",
 				client->crypted ? t_crypt : t_plain,
 				module->desc,
@@ -424,7 +424,7 @@ int32_t cs_auth_client(struct s_client *client, struct s_auth *account, const ch
 		case 0: // reject access
 		{
 			rc = 1;
-			cs_add_violation(client, NULL);
+			cs_add_auth_violation(client, NULL);
 			cs_log("%s %s-client %s%s (%s)",
 					client->crypted ? t_crypt : t_plain,
 					module->desc,
@@ -449,7 +449,7 @@ int32_t cs_auth_client(struct s_client *client, struct s_auth *account, const ch
 #endif
 				if(!IP_EQUAL(client->ip, account->dynip))
 				{
-					cs_add_violation(client, account->usr);
+					cs_add_auth_violation(client, account->usr);
 					rc = 2;
 				}
 			}
@@ -779,6 +779,16 @@ void free_client(struct s_client *cl)
 		return;
 	}
 
+	if(cl != cur_client())
+	{
+		kill_thread(cl);
+		return;
+	}
+
+	SAFE_MUTEX_LOCK(&cl->thread_lock);
+	cl->thread_active = 0;
+	SAFE_MUTEX_UNLOCK(&cl->thread_lock);
+
 	struct s_reader *rdr = cl->reader;
 
 	// Remove client from client list. kill_thread also removes this client, so here just if client exits itself...
@@ -843,8 +853,6 @@ void free_client(struct s_client *cl)
 		ll_destroy_data(&rdr->emmstat);
 		remove_reader_from_active(rdr);
 
-		cs_sleepms(1000); // just wait a bit that really really nobody is accessing client data
-
 		if(rdr->ph.cleanup)
 		{
 			rdr->ph.cleanup(cl);
@@ -872,7 +880,6 @@ void free_client(struct s_client *cl)
 		cl->last_srvid = NO_SRVID_VALUE;
 		cs_statistics(cl);
 
-		cs_sleepms(1000); // just wait a bit that really really nobody is accessing client data
 	}
 
 	struct s_module *module = get_module(cl);
@@ -890,6 +897,16 @@ void free_client(struct s_client *cl)
 	// Clean all remaining structures
 	free_joblist(cl);
 	NULLFREE(cl->work_mbuf);
+
+	if(rdr)
+	{
+		cs_writelock(__func__, &readerlist_lock);
+		if(rdr->client == cl)
+		{
+			rdr->client = NULL;
+		}
+		cs_writeunlock(__func__, &readerlist_lock);
+	}
 
 	if(cl->ecmtask)
 	{

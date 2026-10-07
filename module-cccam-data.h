@@ -14,9 +14,6 @@
 #define CC_MAX_PROV 32
 #define SWAPC(X, Y) do { char p; p = *X; *X = *Y; *Y = p; } while(0)
 
-#if (defined(WIN32) || defined(__CYGWIN__)) && !defined(MSG_WAITALL)
-#define MSG_WAITALL 0
-#endif
 
 #define MINIMIZE_NONE 0
 #define MINIMIZE_HOPS 1

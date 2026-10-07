@@ -58,109 +58,119 @@ static int32_t pcsc_init(struct s_reader *pcsc_reader)
 	DWORD dwReaders = 0;
 	LPSTR mszReaders = NULL;
 	char *ptr, **readers = NULL;
+	char *device_line = NULL;
+	char *device_first = NULL;
+	char *device_second = NULL;
 	char *device = pcsc_reader->device;
 	int32_t nbReaders;
 	int32_t reader_nb;
+	SCARDCONTEXT hContext;
+	struct pcsc_data *crdr_data = NULL;
 
 	rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC establish context for PCSC pcsc_reader %s", device);
-	SCARDCONTEXT hContext;
 	memset(&hContext, 0, sizeof(hContext));
 	rv = SCardEstablishContext(SCARD_SCOPE_SYSTEM, NULL, NULL, &hContext);
-	if(rv == SCARD_S_SUCCESS)
-	{
-		if(!cs_malloc(&pcsc_reader->crdr_data, sizeof(struct pcsc_data)))
-			{ return ERROR; }
-		struct pcsc_data *crdr_data = pcsc_reader->crdr_data;
-		crdr_data->hContext = hContext;
-
-		// here we need to list the pcsc readers and get the name from there,
-		// the pcsc_reader->device should contain the pcsc_reader number
-		// and after the actual device name is copied in crdr_data->pcsc_name .
-		rv = SCardListReaders(crdr_data->hContext, NULL, NULL, &dwReaders);
-		if(rv != SCARD_S_SUCCESS)
-		{
-			rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC failed listing readers [1] : (%lx)", (unsigned long)rv);
-			return ERROR;
-		}
-		if(!cs_malloc(&mszReaders, dwReaders))
-			{ return ERROR; }
-		rv = SCardListReaders(crdr_data->hContext, NULL, mszReaders, &dwReaders);
-		if(rv != SCARD_S_SUCCESS)
-		{
-			rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC failed listing readers [2]: (%lx)", (unsigned long)rv);
-			NULLFREE(mszReaders);
-			return ERROR;
-		}
-		/* Extract readers from the null separated string and get the total
-		 * number of readers
-		 */
-		nbReaders = 0;
-		ptr = mszReaders;
-		while(*ptr != '\0')
-		{
-			ptr += cs_strlen(ptr) + 1;
-			nbReaders++;
-		}
-
-		if(nbReaders == 0)
-		{
-			rdr_log(pcsc_reader, "PCSC : no pcsc_reader found");
-			NULLFREE(mszReaders);
-			return ERROR;
-		}
-
-		if(!cs_malloc(&readers, nbReaders * sizeof(char *)))
-		{
-			NULLFREE(mszReaders);
-			return ERROR;
-		}
-
-		char* device_line;
-		char* device_first;
-		char* device_second;
-
-		device_line = strdup((const char *)&pcsc_reader->device);
-		device_first = strsep(&device_line, ":");
-		device_second = strsep(&device_line, ":");
-		reader_nb = atoi(device_first);
-
-		/* fill the readers table */
-		nbReaders = 0;
-		ptr = mszReaders;
-		while(*ptr != '\0')
-		{
-			rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC pcsc_reader %d: %s", nbReaders, ptr);
-			readers[nbReaders] = ptr;
-			if ((reader_nb == -1) && (device_second != NULL) && strstr(ptr,device_second)){
-				reader_nb = nbReaders;
-			}
-			ptr += cs_strlen(ptr) + 1;
-			nbReaders++;
-		}
-
-		if(reader_nb < 0 || reader_nb >= nbReaders)
-		{
-			rdr_log(pcsc_reader, "Wrong pcsc_reader index: %d", reader_nb);
-			NULLFREE(mszReaders);
-			NULLFREE(readers);
-			NULLFREE(device_line);
-			return ERROR;
-		}
-
-		if (readers)
-		{
-		snprintf(crdr_data->pcsc_name, sizeof(crdr_data->pcsc_name), "%s", readers[reader_nb]);
-		NULLFREE(readers);
-		}
-		NULLFREE(mszReaders);
-		NULLFREE(device_line);
-	}
-	else
+	if(rv != SCARD_S_SUCCESS)
 	{
 		rdr_log(pcsc_reader, "PCSC failed establish context (%lx)", (unsigned long)rv);
 		return ERROR;
 	}
+
+	if(!cs_malloc(&pcsc_reader->crdr_data, sizeof(struct pcsc_data)))
+	{
+		SCardReleaseContext(hContext);
+		return ERROR;
+	}
+	crdr_data = pcsc_reader->crdr_data;
+	crdr_data->hContext = hContext;
+
+	rv = SCardListReaders(crdr_data->hContext, NULL, NULL, &dwReaders);
+	if(rv != SCARD_S_SUCCESS)
+	{
+		rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC failed listing readers [1] : (%lx)", (unsigned long)rv);
+		goto fail;
+	}
+	if(!dwReaders)
+	{
+		rdr_log(pcsc_reader, "PCSC : no pcsc_reader found");
+		goto fail;
+	}
+	if(!cs_malloc(&mszReaders, dwReaders))
+		{ goto fail; }
+
+	rv = SCardListReaders(crdr_data->hContext, NULL, mszReaders, &dwReaders);
+	if(rv != SCARD_S_SUCCESS)
+	{
+		rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC failed listing readers [2]: (%lx)", (unsigned long)rv);
+		goto fail;
+	}
+
+	nbReaders = 0;
+	ptr = mszReaders;
+	while(*ptr != '\0')
+	{
+		ptr += cs_strlen(ptr) + 1;
+		nbReaders++;
+	}
+	if(nbReaders == 0)
+	{
+		rdr_log(pcsc_reader, "PCSC : no pcsc_reader found");
+		goto fail;
+	}
+
+	if(!cs_malloc(&readers, nbReaders * sizeof(char *)))
+		{ goto fail; }
+
+	device_line = cs_strdup(pcsc_reader->device);
+	if(!device_line)
+		{ goto fail; }
+	device_first = strsep(&device_line, ":");
+	device_second = strsep(&device_line, ":");
+	reader_nb = device_first && device_first[0] ? atoi(device_first) : -1;
+
+	nbReaders = 0;
+	ptr = mszReaders;
+	while(*ptr != '\0')
+	{
+		rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC pcsc_reader %d: %s", nbReaders, ptr);
+		readers[nbReaders] = ptr;
+		if(reader_nb == -1 && device_second != NULL && strstr(ptr, device_second))
+			{ reader_nb = nbReaders; }
+		ptr += cs_strlen(ptr) + 1;
+		nbReaders++;
+	}
+
+	if(reader_nb < 0 || reader_nb >= nbReaders)
+	{
+		rdr_log(pcsc_reader, "Wrong pcsc_reader index: %d", reader_nb);
+		goto fail;
+	}
+
+	snprintf(crdr_data->pcsc_name, sizeof(crdr_data->pcsc_name), "%s", readers[reader_nb]);
+	NULLFREE(readers);
+	NULLFREE(mszReaders);
+	NULLFREE(device_line);
 	return OK;
+
+fail:
+	NULLFREE(readers);
+	NULLFREE(mszReaders);
+	NULLFREE(device_line);
+	if(crdr_data)
+	{
+		if(crdr_data->hCard)
+		{
+			SCardDisconnect(crdr_data->hCard, SCARD_LEAVE_CARD);
+			crdr_data->hCard = 0;
+		}
+		if(crdr_data->hContext)
+		{
+			SCardReleaseContext(crdr_data->hContext);
+			crdr_data->hContext = 0;
+		}
+		NULLFREE(pcsc_reader->crdr_data);
+	}
+	return ERROR;
 }
 
 static int32_t pcsc_do_api(struct s_reader *pcsc_reader, const uint8_t *buf, uint8_t *cta_res, uint16_t *cta_lr, int32_t l)
@@ -303,7 +313,7 @@ static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
 	struct pcsc_data *crdr_data = pcsc_reader->crdr_data;
 	DWORD dwState, dwAtrLen, dwReaderLen;
 	unsigned char pbAtr[64];
-	SCARDHANDLE rv;
+	LONG rv;
 
 	dwAtrLen = sizeof(pbAtr);
 	rv = 0;
@@ -315,7 +325,7 @@ static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
 	{
 		// try connecting to the card
 		rv = SCardConnect(crdr_data->hContext, crdr_data->pcsc_name, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &crdr_data->hCard, &crdr_data->dwActiveProtocol);
-		if(rv == (SCARDHANDLE)SCARD_E_NO_SMARTCARD)
+		if(rv == (LONG)SCARD_E_NO_SMARTCARD)
 		{
 			// no card in pcsc_reader
 			crdr_data->pcsc_has_card = 0;
@@ -327,7 +337,7 @@ static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
 			// rdr_log_dbg(pcsc_reader, D_DEVICE, "PCSC card in %s removed / absent [dwstate=%lx rv=(%lx)]", crdr_data->pcsc_name, dwState, (unsigned long)rv );
 			return OK;
 		}
-		else if(rv == (SCARDHANDLE)SCARD_W_UNRESPONSIVE_CARD)
+		else if(rv == (LONG)SCARD_W_UNRESPONSIVE_CARD)
 		{
 			// there is a problem with the card in the pcsc_reader
 			crdr_data->pcsc_has_card = 0;
@@ -378,9 +388,19 @@ static int32_t pcsc_get_status(struct s_reader *reader, int32_t *in)
 static int32_t pcsc_close(struct s_reader *pcsc_reader)
 {
 	struct pcsc_data *crdr_data = pcsc_reader->crdr_data;
+	if(!crdr_data) { return OK; }
 	rdr_log_dbg(pcsc_reader, D_IFD, "PCSC : Closing device %s", pcsc_reader->device);
-	SCardDisconnect(crdr_data->hCard, SCARD_LEAVE_CARD);
-	SCardReleaseContext(crdr_data->hContext);
+	if(crdr_data->hCard)
+	{
+		SCardDisconnect(crdr_data->hCard, SCARD_LEAVE_CARD);
+		crdr_data->hCard = 0;
+	}
+	if(crdr_data->hContext)
+	{
+		SCardReleaseContext(crdr_data->hContext);
+		crdr_data->hContext = 0;
+	}
+	NULLFREE(pcsc_reader->crdr_data);
 	return OK;
 }
 

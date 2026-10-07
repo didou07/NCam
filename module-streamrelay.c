@@ -6,6 +6,8 @@
 
 #include "module-streamrelay.h"
 #include "ncam-chk.h"
+#include "ncam-country.h"
+#include "ncam-failban.h"
 #include "ncam-client.h"
 #include "ncam-config.h"
 #include "ncam-net.h"
@@ -55,7 +57,7 @@ static uint8_t (*dvbcsa_get_ecm_table_fn)(void) = NULL;
 
 static uint8_t stream_server_mutex_init = 0;
 static pthread_mutex_t stream_server_mutex;
-static int32_t glistenfd, mod_idx, gconncount = 0, gconnfd[STREAM_SERVER_MAX_CONNECTIONS], stream_resptime[STREAM_SERVER_MAX_CONNECTIONS];
+static int32_t glistenfd = -1, mod_idx, gconncount = 0, gconnfd[STREAM_SERVER_MAX_CONNECTIONS], stream_resptime[STREAM_SERVER_MAX_CONNECTIONS];
 static char ecm_src[STREAM_SERVER_MAX_CONNECTIONS][9];
 static IN_ADDR_T client_ip[STREAM_SERVER_MAX_CONNECTIONS], stream_host_ip[STREAM_SERVER_MAX_CONNECTIONS];
 static in_port_t client_port[STREAM_SERVER_MAX_CONNECTIONS];
@@ -1513,8 +1515,9 @@ static void stream_client_disconnect(stream_client_conn_data *conndata)
 
 	if(streamrelay_client[conndata->connid] && !cfg.stream_reuse_client && !streamrelay_client[conndata->connid]->kill_started)
 	{
-		cs_disconnect_client(streamrelay_client[conndata->connid]);
-		free_client(streamrelay_client[conndata->connid]);
+		struct s_client *cl = streamrelay_client[conndata->connid];
+		free_client(cl);
+		streamrelay_client[conndata->connid] = NULL;
 	}
 
 	NULLFREE(conndata);
@@ -1534,7 +1537,7 @@ static void streamrelay_auth_client(struct s_client *cl)
 	cs_auth_client(cl, ok ? account : (struct s_auth *)(-1), "streamrelay");
 }
 
-static void create_streamrelay_client(stream_client_conn_data *conndata)
+static int8_t create_streamrelay_client(stream_client_conn_data *conndata)
 {
 	int32_t i, exists = 0;
 
@@ -1557,6 +1560,12 @@ static void create_streamrelay_client(stream_client_conn_data *conndata)
 	if (!exists)
 		{ streamrelay_client[conndata->connid] = create_client(client_ip[conndata->connid]); }
 
+	if (!streamrelay_client[conndata->connid])
+	{
+		cs_log("ERROR: unable to create Stream Relay client %d", conndata->connid);
+		return 0;
+	}
+
 	streamrelay_client[conndata->connid]->typ = 'c';
 	streamrelay_client[conndata->connid]->module_idx = mod_idx;
 	streamrelay_client[conndata->connid]->thread = pthread_self();
@@ -1565,6 +1574,7 @@ static void create_streamrelay_client(stream_client_conn_data *conndata)
 #ifdef WEBIF
 	streamrelay_client[conndata->connid]->wihidden = cfg.stream_hide_client;
 #endif
+	return 1;
 }
 
 static void *stream_client_handler(void *arg)
@@ -1581,7 +1591,7 @@ static void *stream_client_handler(void *arg)
 
 	uint8_t *stream_buf = NULL;
 	uint16_t packetCount = 0, packetSize = 0, startOffset = 0;
-	uint32_t remainingDataPos, remainingDataLength, tmp_pids[4];
+	uint32_t remainingDataPos, remainingDataLength, tmp_pids[4] = { 0, 0, 0, 0 };
 	uint8_t descrambling = 0;
 
 	struct timeb start, end;
@@ -1593,7 +1603,11 @@ static void *stream_client_handler(void *arg)
 #endif
 	struct dvbcsa_bs_batch_s *tsbbatch = NULL;
 
-	create_streamrelay_client(conndata);
+	if(!create_streamrelay_client(conndata))
+	{
+		stream_client_disconnect(conndata);
+		return NULL;
+	}
 	SAFE_SETSPECIFIC(getclient, streamrelay_client[conndata->connid]);
 	set_thread_name(__func__);
 
@@ -2037,6 +2051,12 @@ static void *stream_server(void)
 
 			connaccepted = 0;
 
+			if(!ncam_country_access_allowed(SIN_GET_ADDR(cliaddr)) || cs_check_violation(SIN_GET_ADDR(cliaddr), cfg.stream_relay_port))
+			{
+				close(connfd);
+				continue;
+			}
+
 			if (cs_malloc(&conndata, sizeof(stream_client_conn_data)))
 			{
 				SAFE_MUTEX_LOCK(&stream_server_mutex);
@@ -2081,8 +2101,10 @@ static void *stream_server(void)
 		}
 	} while (0);
 
+	SAFE_MUTEX_LOCK(&stream_server_mutex);
 	if (glistenfd >= 0)
-		{ close(glistenfd); }
+		{ close(glistenfd); glistenfd = -1; }
+	SAFE_MUTEX_UNLOCK(&stream_server_mutex);
 
 	return NULL;
 }
@@ -2203,7 +2225,6 @@ void stop_stream_server(void)
 	if (glistenfd >= 0)
 	{
 		shutdown(glistenfd, 2);
-		close(glistenfd);
 	}
 
 	NULLFREE(stream_source_auth);

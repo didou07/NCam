@@ -245,11 +245,7 @@ typedef uint8_t uint8_t;
 //checking if (X) free(X) unneccessary since freeing a null pointer doesnt do anything
 #define NULLFREE(X) {if (X) {void *tmpX=X; X=NULL; free(tmpX); }}
 
-#ifdef __CYGWIN__
-#define cs_recv(a,b,c,d) cygwin_recv(a,b,c,d)
-#else
 #define cs_recv(a,b,c,d) recv(a,b,c,d)
-#endif
 
 //safe wrappers to pthread functions
 #define fprintf_stderr(fmt, params...)	fprintf(stderr, fmt, ##params)
@@ -325,11 +321,21 @@ typedef uint8_t uint8_t;
 
 #define SAFE_MUTEX_INIT_R(a,b,c)                  SAFE_PTHREAD_2ARG_R(pthread_mutex_init, a, b, cs_log, c)
 #define SAFE_COND_INIT_R(a,b,c)                   SAFE_PTHREAD_2ARG_R(pthread_cond_init, a, b, cs_log, c)
-#define SAFE_CONDATTR_SETCLOCK_R(a,b,c)           SAFE_PTHREAD_2ARG(pthread_condattr_setclock, a, b, cs_log, c)
+#define SAFE_CONDATTR_SETCLOCK_R(a,b,c) { \
+	int32_t pter = pthread_condattr_setclock((a), (b)); \
+	if(pter != 0) \
+	{ \
+		cs_log("FATAL ERROR: pthread_condattr_setclock() failed in %s (called from %s) with error %d %s\n", __func__, (c), pter, strerror(pter)); \
+	} }
 
 #define SAFE_MUTEX_INIT_NOLOG_R(a,b,c)            SAFE_PTHREAD_2ARG_R(pthread_mutex_init, a, b, fprintf_stderr, c)
 #define SAFE_COND_INIT_NOLOG_R(a,b,c)             SAFE_PTHREAD_2ARG_R(pthread_cond_init, a, b, fprintf_stderr, c)
-#define SAFE_CONDATTR_SETCLOCK_NOLOG_R(a,b,c)     SAFE_PTHREAD_2ARG(pthread_condattr_setclock, a, b, fprintf_stderr, c)
+#define SAFE_CONDATTR_SETCLOCK_NOLOG_R(a,b,c) { \
+	int32_t pter = pthread_condattr_setclock((a), (b)); \
+	if(pter != 0) \
+	{ \
+		fprintf_stderr("FATAL ERROR: pthread_condattr_setclock() failed in %s (called from %s) with error %d %s\n", __func__, (c), pter, strerror(pter)); \
+	} }
 
 #define SAFE_COND_TIMEDWAIT(a, b, c) { \
 	int32_t pter; \
@@ -725,10 +731,13 @@ typedef struct cs_mutexlock
 {
 	int32_t         timeout;
 	pthread_mutex_t lock;
-	pthread_cond_t  writecond, readcond;
+	pthread_cond_t  writecond, readcond, destroycond;
 	const char      *name;
 	int8_t          flag;
+	int8_t          destroying;
 	int16_t         writelock, readlock;
+	int16_t         waiting_writers;
+	int16_t         users;
 } CS_MUTEX_LOCK;
 
 #include "ncam-llist.h"
@@ -898,6 +907,7 @@ typedef struct v_ban                    // Failban listmember
 	bool            acosc_entry;
 	int32_t         acosc_penalty_dur;
 	char            *info;
+	bool            blocked_logged;
 } V_BAN;
 
 typedef struct s_cacheex_stat_entry     // Cacheex stats listmember
@@ -1638,6 +1648,7 @@ struct s_reader
 	struct s_client *client;                        // pointer to 'r'client this reader is running in
 	LLIST           *ll_entitlements;               // entitlements
 	int8_t          enable;
+	uint8_t         restart_pending;
 	int8_t          active;
 	int8_t          for_demux;                      // set demux number for which use this reader
 	int8_t          dropbadcws;                     // Schlocke: 1=drops cw if checksum is wrong. 0=fix checksum (default)
@@ -1827,16 +1838,13 @@ struct s_reader
 	int8_t          fastreset_enabled;
 	int32_t         fastreset_interval;             // seconds between forced resets
 	time_t          fastreset_next;                 // runtime: next due time
-	int8_t          old_ecm_enabled;                // reuse a successful ECM for periodic card activity
-	int8_t          old_ecm_source;                 // 0=auto first successful ECM, 1=manual configured ECM
-	int8_t          old_ecm_trigger;                // 0=interval, 1=successful ECM count
-	int32_t         old_ecm_interval;               // seconds between old ECM attempts
+	int8_t          old_ecm_enabled;
+	int8_t          old_ecm_source;                 // 0=first successful ECM, 1=manual configured ECM
 	int32_t         old_ecm_successes;              // successful live ECMs between old ECM attempts
 	char            old_ecm[MAX_ECM_SIZE * 2 + 1];  // manual ECM in hexadecimal
 	uint8_t         old_ecm_data[MAX_ECM_SIZE];     // runtime ECM
 	uint16_t        old_ecm_len;
 	uint32_t        old_ecm_success_count;
-	time_t          old_ecm_last_run;
 	uint8_t         old_ecm_valid;
 	uint8_t         old_ecm_queued;
 	uint32_t        old_ecm_config_hash;
@@ -2362,6 +2370,8 @@ struct s_config
 	IN_ADDR_T       http_srvip;
 	char            *http_user;
 	char            *http_pwd;
+	char            *http_allowed_countries;
+	int8_t          http_country_enabled;
 	int8_t          http_style;
 	char            *http_backround_color;
 	char            *http_text_color;
@@ -2390,6 +2400,7 @@ struct s_config
 	int8_t          http_showcacheexinfo;
 	int8_t          http_utf8;
 	struct s_ip     *http_allowed;
+	struct s_ip     *http_country_exceptions;
 	int8_t          http_readonly;
 	IN_ADDR_T       http_dynip[MAX_HTTP_DYNDNS];
 	uint8_t           http_dyndns[MAX_HTTP_DYNDNS][64];

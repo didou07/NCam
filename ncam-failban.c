@@ -9,107 +9,89 @@
 static int32_t cs_check_v(IN_ADDR_T ip, int32_t port, int32_t add, char *info, int32_t acosc_penalty_duration)
 {
 	int32_t result = 0;
-
 	if(!(cfg.failbantime || acosc_enabled()))
 		return 0;
-
+	if(add && !acosc_penalty_duration && cfg.failbantime <= 0)
+		return 0;
 	if(!cfg.v_list)
-		{ cfg.v_list = ll_create("v_list"); }
-
-	struct timeb (now);
+		cfg.v_list = ll_create("v_list");
+	struct timeb now;
 	cs_ftime(&now);
 	LL_ITER itr = ll_iter_create(cfg.v_list);
-	V_BAN *v_ban_entry;
-	int32_t ftime = cfg.failbantime * 60 * 1000;
-
-	// run over all banned entries to do housekeeping:
-	while((v_ban_entry = ll_iter_next(&itr)))
+	V_BAN *v = NULL;
+	int32_t ftime = cfg.failbantime > 0 ? cfg.failbantime * 60 * 1000 : 0;
+	while((v = ll_iter_next(&itr)))
 	{
-		// housekeeping:
-		int64_t gone = comp_timeb(&now, &v_ban_entry->v_time);
-		if(((gone >= ftime) && !v_ban_entry->acosc_entry) || (v_ban_entry->acosc_entry && ((gone/1000) >= v_ban_entry->acosc_penalty_dur))) // entry out of time->remove
+		int64_t gone = comp_timeb(&now, &v->v_time);
+		if(((gone >= ftime) && !v->acosc_entry && ftime > 0) || (v->acosc_entry && (gone / 1000 >= v->acosc_penalty_dur)))
 		{
-			NULLFREE(v_ban_entry->info);
+			NULLFREE(v->info);
 			ll_iter_remove_data(&itr);
 			continue;
 		}
-
-		if(IP_EQUAL(ip, v_ban_entry->v_ip) && port == v_ban_entry->v_port)
+		bool match = IP_EQUAL(ip, v->v_ip) && (port == v->v_port || v->v_port == 0);
+		if(!match)
+			continue;
+		if(!add)
 		{
-			result = 1;
-			if(!info)
-				{ info = v_ban_entry->info; }
-			else if(!v_ban_entry->info)
+			if(v->acosc_entry || (cfg.failbancount > 0 && v->v_count >= cfg.failbancount))
 			{
-				v_ban_entry->info = cs_strdup(info);
-			}
-
-			if(!add)
-			{
-				if(v_ban_entry->v_count >= cfg.failbancount)
+				result = 1;
+				if(!v->blocked_logged)
 				{
-					if(!v_ban_entry->acosc_entry)
-					{
-						cs_log_dbg(D_TRACE, "failban: banned ip %s:%d - %"PRId64" seconds left %s%s",
-									cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port,
-									(ftime - gone) / 1000, info ? ", info: " : "", info ? info : "");
-					}
-					else
-					{
-						cs_log_dbg(D_TRACE, "failban: banned ip %s:%d - %"PRId64" seconds left %s%s",
-									cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port,
-									(v_ban_entry->acosc_penalty_dur - (gone / 1000)),
-									info ? ", info: " : "", info ? info : "");
-					}
-
+					int64_t left = v->acosc_entry ? v->acosc_penalty_dur - (gone / 1000) : (ftime - gone) / 1000;
+					cs_log("blocked %s for %" PRId64 " seconds", cs_inet_ntoa(v->v_ip), left > 0 ? left : 0);
+					v->blocked_logged = true;
 				}
-				else
-				{
-					cs_log_dbg(D_TRACE, "failban: ip %s:%d chance %d of %d%s%s",
-								cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port,
-								v_ban_entry->v_count, cfg.failbancount,
-								info ? ", info: " : "", info ? info : "");
-
-					v_ban_entry->v_count++;
-				}
+				break;
 			}
-			else
+			continue;
+		}
+		result = 1;
+		if(v->acosc_entry)
+			return result;
+		if(v->v_count < cfg.failbancount)
+		{
+			v->v_count++;
+			if(v->v_count >= cfg.failbancount)
 			{
-				cs_log_dbg(D_TRACE, "failban: banned ip %s:%d - already exist in list %s%s",
-							cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port,
-							info ? ", info: " : "", info ? info : "");
+				cs_ftime(&v->v_time);
+				v->blocked_logged = true;
+				cs_log("banned %s for %d minutes", cs_inet_ntoa(v->v_ip), cfg.failbantime);
 			}
 		}
+		if(info && !v->info)
+			v->info = cs_strdup(info);
+		return result;
 	}
-
 	if(add && !result)
 	{
-		if(cs_malloc(&v_ban_entry, sizeof(V_BAN)))
+		if(!cs_malloc(&v, sizeof(V_BAN)))
+			return 0;
+		cs_ftime(&v->v_time);
+		v->v_ip = ip;
+		v->v_port = port;
+		v->v_count = 1;
+		v->acosc_entry = false;
+		v->acosc_penalty_dur = 0;
+		v->blocked_logged = false;
+		if(acosc_penalty_duration > 0)
 		{
-			cs_ftime(&v_ban_entry->v_time);
-			v_ban_entry->v_ip = ip;
-			v_ban_entry->v_port = port;
-			v_ban_entry->v_count = 1;
-			v_ban_entry->acosc_entry = false;
-			v_ban_entry->acosc_penalty_dur = 0;
-
-			if(acosc_penalty_duration > 0)
-			{
-				v_ban_entry->v_count = cfg.failbancount +1; // set it to a higher level
-				v_ban_entry->acosc_entry = true;
-				v_ban_entry->acosc_penalty_dur = acosc_penalty_duration;
-			}
-
-			if(info)
-				{ v_ban_entry->info = cs_strdup(info); }
-
-			ll_iter_insert(&itr, v_ban_entry);
-			cs_log_dbg(D_TRACE, "failban: ban ip %s:%d with timestamp %" PRId64 "%s%s",
-						cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port, (int64_t)v_ban_entry->v_time.time,
-						info ? ", info: " : "", info ? info : "");
+			v->v_count = cfg.failbancount + 1;
+			v->acosc_entry = true;
+			v->acosc_penalty_dur = acosc_penalty_duration;
+			v->blocked_logged = false;
+			cs_log("banned %s for %d seconds", cs_inet_ntoa(v->v_ip), acosc_penalty_duration);
 		}
+		else if(cfg.failbancount <= 1)
+		{
+			v->blocked_logged = false;
+			cs_log("banned %s for %d minutes", cs_inet_ntoa(v->v_ip), cfg.failbantime);
+		}
+		if(info)
+			v->info = cs_strdup(info);
+		ll_iter_insert(&itr, v);
 	}
-
 	return result;
 }
 
@@ -132,6 +114,11 @@ void cs_add_violation(struct s_client *cl, char *info)
 {
 	struct s_module *module = get_module(cl);
 	cs_add_violation_by_ip(cl->ip, module->ptab.ports[cl->port_idx].s_port, info);
+}
+
+void cs_add_auth_violation(struct s_client *cl, char *info)
+{
+	cs_add_violation_by_ip(cl->ip, 0, info);
 }
 
 void cs_add_violation_acosc(struct s_client *cl, char *info, int32_t acosc_penalty_duration)

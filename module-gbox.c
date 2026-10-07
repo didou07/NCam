@@ -791,6 +791,7 @@ static int8_t gbox_auth_client(struct s_client *cli, uint32_t gbox_password)
 	uint16_t gbox_id = gbox_convert_password_to_id(gbox_password);
 	struct s_client *cl = get_gbox_proxy(gbox_id);
 
+	if(!cl) { return -1; }
 	if(cl->typ == 'p' && cl->gbox && cl->reader)
 	{
 		struct gbox_peer *peer = cl->gbox;
@@ -857,17 +858,20 @@ int16_t read_cards_from_hello(uint8_t *ptr, uint8_t *len, CAIDTAB *ctab, uint8_t
 
 	while(ptr < len)
 	{
+		if((size_t)(len - ptr) < 5) { return -1; }
 		caprovid = ptr[0] << 24 | ptr[1] << 16 | ptr[2] << 8 | ptr[3];
 
 		ncards_in_msg += ptr[4];
+		current_ptr = ptr;
+		uint8_t cards = ptr[4];
+		if((size_t)(len - ptr) < (size_t)5 + (size_t)cards * 4) { return -1; }
 		//caid check
 		if(chk_ctab(gbox_get_caid(caprovid), ctab))
 		{
-			current_ptr = ptr;
 			ptr += 5;
 
 			// for all cards of current caid/provid,
-			while (ptr < current_ptr + 5 + current_ptr[4] * 4)
+			while (ptr < current_ptr + 5 + cards * 4)
 			{
 				if ((ptr[1] & 0xf) <= maxdist)
 				{
@@ -944,7 +948,7 @@ static void gbox_send_my_checkcode(struct s_client *cli)
 
 int32_t gbox_cmd_hello_rcvd(struct s_client *cli, uint8_t *data, int32_t n)
 {
-	if (!cli || !cli->gbox || !cli->reader || !data) { return -1; }
+	if (!cli || !cli->gbox || !cli->reader || !data || n < 12) { return -1; }
 
 	struct gbox_peer *peer = cli->gbox;
 	int16_t cards_number = 0;
@@ -966,6 +970,7 @@ int32_t gbox_cmd_hello_rcvd(struct s_client *cli, uint8_t *data, int32_t n)
 		ptr = data + 11;
 		cs_log_dump_dbg(D_READER, data, payload_len, "decrypted data (%d bytes):", payload_len);
 	}
+	if(payload_len < 12) { return -1; }
 
 	if ((data[11] & 0xf) != peer->next_hello) // out of sync hellos
 	{
@@ -982,6 +987,7 @@ int32_t gbox_cmd_hello_rcvd(struct s_client *cli, uint8_t *data, int32_t n)
 		gbox_delete_cards(GBOX_DELETE_FROM_PEER, peer->gbox.id);
 		hostname_len = data[payload_len - 1];
 		footer_len = hostname_len + 2 + 7;
+		if((uint32_t)footer_len + 1 > (uint32_t)payload_len) { return -1; }
 
 		if(peer->hostname && memcmp(peer->hostname, data + payload_len - 1 - hostname_len, hostname_len))
 			{
@@ -1227,8 +1233,8 @@ static int8_t gbox_incoming_ecm(struct s_client *cli, uint8_t *data, int32_t n)
 		return -1;
 	}
 
-	// No ECMs with length < MIN_LENGTH expected
-	if ((((data[19] & 0x0f) << 8) | data[20]) < MIN_ECM_LENGTH)
+	uint32_t ecm_len = (((data[19] & 0x0f) << 8) | data[20]) + 3;
+	if(ecm_len < MIN_ECM_LENGTH || ecm_len > MAX_ECM_SIZE || ecm_len + 18 > (uint32_t)n)
 	{
 		return -1;
 	}
@@ -1282,14 +1288,7 @@ static int8_t gbox_incoming_ecm(struct s_client *cli, uint8_t *data, int32_t n)
 	}
 
 	er->idx = peer->ecm_idx++;
-	er->ecmlen = SCT_LEN(ecm);
-
-	if(er->ecmlen < 3 || er->ecmlen > MAX_ECM_SIZE || er->ecmlen + 18 > n)
-	{
-		NULLFREE(ere);
-		NULLFREE(er);
-		return -1;
-	}
+	er->ecmlen = ecm_len;
 
 	er->pid = b2i(2, data + 10);
 	er->srvid = b2i(2, data + 12);
@@ -1512,6 +1511,12 @@ int32_t gbox_recv_cmd_switch(struct s_client *proxy, uint8_t *data, int32_t n)
 			break;
 
 		case MSG_GSMS:
+			if(n < 17 || data[15] > GBOX_MAX_MSG_TXT || 17 + data[15] > n)
+			{
+				cs_log("-> invalid MSG_GSMS length from %s", username(proxy));
+				return -1;
+			}
+			data[16 + data[15]] = '\0';
 			if(!cfg.gsms_dis)
 			{
 				cs_log("-> MSG_GSMS from %s %s", username(proxy), proxy->reader->device);
@@ -1550,6 +1555,7 @@ int32_t gbox_recv_cmd_switch(struct s_client *proxy, uint8_t *data, int32_t n)
 			break;
 
 		case MSG_CHECKCODE:
+			if(n < 17) { return -1; }
 			diffcheck = gbox_checkcode_recvd(proxy, data + 10, 0);
 
 			if (cfg.log_hello)
@@ -1877,6 +1883,7 @@ static int8_t gbox_check_header_recvd(struct s_client *cli, struct s_client *pro
 		}
 		else // is MSG_CW
 		{
+			if(n < 41) { return -1; }
 			cs_log_dbg(D_READER, "-> CW MSG from peer: %04X data: %s",
 				cli->gbox_peer_id, cs_hexdump(0, data, l, tmp, sizeof(tmp)));
 

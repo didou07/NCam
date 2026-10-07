@@ -282,7 +282,7 @@ int64_t add_ms_to_timeb_diff(struct timeb *tb, int32_t ms)
 #endif
 
 // Assume we have HAVE_pthread_condattr_setclock if CLOCK_MONOTONIC is defined
-#if defined(CLOCKFIX) && defined(CLOCK_MONOTONIC)
+#if defined(CLOCK_MONOTONIC)
 #define HAVE_pthread_condattr_setclock 1
 #endif
 
@@ -304,28 +304,24 @@ int64_t add_ms_to_timeb_diff(struct timeb *tb, int32_t ms)
 void __cs_pthread_cond_init(const char *n, pthread_cond_t *cond)
 {
 	pthread_condattr_t attr;
-	SAFE_CONDATTR_INIT_R(&attr, n); // init condattr with defaults
-#if 0
+	SAFE_CONDATTR_INIT_R(&attr, n);
 #if defined(HAVE_pthread_condattr_setclock)
 	enum clock_type ctype = cs_getclocktype();
 	SAFE_CONDATTR_SETCLOCK_R(&attr, (ctype == CLOCK_TYPE_MONOTONIC) ? CLOCK_MONOTONIC : CLOCK_REALTIME, n);
 #endif
-#endif
-	SAFE_COND_INIT_R(cond, &attr, n); // init thread with right clock assigned
+	SAFE_COND_INIT_R(cond, &attr, n);
 	pthread_condattr_destroy(&attr);
 }
 
 void __cs_pthread_cond_init_nolog(const char *n, pthread_cond_t *cond)
 {
 	pthread_condattr_t attr;
-	SAFE_CONDATTR_INIT_NOLOG_R(&attr, n); // init condattr with defaults
-#if 0
+	SAFE_CONDATTR_INIT_NOLOG_R(&attr, n);
 #if defined(HAVE_pthread_condattr_setclock)
 	enum clock_type ctype = cs_getclocktype();
 	SAFE_CONDATTR_SETCLOCK_NOLOG_R(&attr, (ctype == CLOCK_TYPE_MONOTONIC) ? CLOCK_MONOTONIC : CLOCK_REALTIME, n);
 #endif
-#endif
-	SAFE_COND_INIT_NOLOG_R(cond, &attr, n); // init thread with right clock assigned
+	SAFE_COND_INIT_NOLOG_R(cond, &attr, n);
 	pthread_condattr_destroy(&attr);
 }
 
@@ -388,18 +384,24 @@ time_t cs_time(void)
 
 void cs_gettime(struct timespec *ts)
 {
+#if defined(CLOCK_MONOTONIC)
+	if(clock_gettime(CLOCK_MONOTONIC, ts) == 0)
+	{
+		clock_type = CLOCK_TYPE_MONOTONIC;
+		return;
+	}
+#endif
 	struct timeval tv;
 	gettimeofday(&tv, NULL);
 #if defined(CLOCKFIX)
-	if (tv.tv_sec > lasttime.tv_sec || (tv.tv_sec == lasttime.tv_sec && tv.tv_usec >= lasttime.tv_usec)) // check for time issues!
+	if (tv.tv_sec > lasttime.tv_sec || (tv.tv_sec == lasttime.tv_sec && tv.tv_usec >= lasttime.tv_usec))
 	{
-		lasttime = tv; // register this valid time
+		lasttime = tv;
 	}
 	else
 	{
 		tv = lasttime;
-		settimeofday(&tv, NULL); // set time back to last known valid time
-		//fprintf(stderr, "*** WARNING: BAD TIME AFFECTING WHOLE NCAM ECM HANDLING, SYSTEMTIME SET TO LAST KNOWN VALID TIME **** \n");
+		settimeofday(&tv, NULL);
 	}
 #endif
 	ts->tv_sec = tv.tv_sec;

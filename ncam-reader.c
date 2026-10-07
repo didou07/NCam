@@ -1217,36 +1217,24 @@ void reader_get_ecm(struct s_reader *reader, ECM_REQUEST *er)
 		// match same ecm
 		if(er->caid == ecm->caid && !memcmp(er->ecmd5, ecm->ecmd5, CS_ECMSTORESIZE))
 		{
-			//check if ask this reader
+			//check if ask this reader and the request is still in flight
 			ea = get_ecm_answer(reader, ecm);
-			if(ea && !ea->is_pending && (ea->status & REQUEST_SENT) && ea->rc != E_TIMEOUT && ea->rcEx != E2_RATELIMIT) { break; }
+			if(ea && !ea->is_pending && (ea->status & REQUEST_SENT) && ea->rc >= E_99 && ea->rcEx != E2_RATELIMIT) { break; }
 			ea = NULL;
 		}
 	}
 
 	cs_readunlock(__func__, &ecmcache_lock);
 
-	if(ea) // found ea in cached ecm, asking for this reader
+	if(ea) // same ECM is already in flight on this reader
 	{
 		ea_er->is_pending = true;
 
 		cs_readlock(__func__, &ea->ecmanswer_lock);
-		if(ea->rc < E_99)
-		{
-			cs_readunlock(__func__, &ea->ecmanswer_lock);
-			cs_log_dbg(D_LB, "{client %s, caid %04X, prid %06X, srvid %04X} [reader_get_ecm] ecm already sent to reader %s (%s)", (check_client(er->client) ? er->client->account->usr : "-"), er->caid, er->prid, er->srvid, reader ? reader->label : "-", ea->rc==E_FOUND?"OK":"NOK");
-
-			//e.g. we cannot send timeout, because "ea_temp->er->client" could wait/ask other readers! Simply set not_found if different from E_FOUND!
-			write_ecm_answer(reader, er, (ea->rc==E_FOUND? E_FOUND : E_NOTFOUND), ea->rcEx, ea->cw, NULL, ea->tier, &ea->cw_ex);
-			return;
-		}
-		else
-		{
-			ea_prev = ea->pending;
-			ea->pending = ea_er;
-			ea->pending->pending_next = ea_prev;
-			cs_log_dbg(D_LB, "{client %s, caid %04X, prid %06X, srvid %04X} [reader_get_ecm] ecm already sent to reader %s... set as pending", (check_client(er->client) ? er->client->account->usr : "-"), er->caid, er->prid, er->srvid, reader ? reader->label : "-");
-		}
+		ea_prev = ea->pending;
+		ea->pending = ea_er;
+		ea->pending->pending_next = ea_prev;
+		cs_log_dbg(D_LB, "{client %s, caid %04X, prid %06X, srvid %04X} [reader_get_ecm] same ecm already in flight on reader %s... set as pending", (check_client(er->client) ? er->client->account->usr : "-"), er->caid, er->prid, er->srvid, reader ? reader->label : "-");
 		cs_readunlock(__func__, &ea->ecmanswer_lock);
 		return;
 	}
@@ -1485,19 +1473,17 @@ static int32_t restart_cardreader_int(struct s_reader *rdr, int32_t restart)
 	struct s_client *cl = rdr->client;
 	if(restart)
 	{
-		remove_reader_from_active(rdr); // remove from list
-		kill_thread(cl); // kill old thread
-		cs_sleepms(1500); // we have to wait a bit so free_client is ended and socket closed too!
+		remove_reader_from_active(rdr);
+		if(cl)
+		{
+			rdr->restart_pending = rdr->enable ? 1 : 0;
+			kill_thread(cl);
+			rdr_log(rdr, "Restart requested; waiting for previous reader thread to exit");
+			return 1;
+		}
 	}
 
-	while(restart && is_valid_client(cl))
-	{
-		// If we quick disable+enable a reader (webif), remove_reader_from_active is called from
-		// cleanup. this could happen AFTER reader is restarted, so ncam crashes or reader is hidden
-		// rdr_log(rdr, "CHECK: WAITING FOR CLEANUP");
-		cs_sleepms(500);
-	}
-
+	rdr->restart_pending = 0;
 	rdr->client = NULL;
 	rdr->tcp_connected = 0;
 	rdr->card_status = UNKNOWN;
@@ -1548,6 +1534,41 @@ static int32_t restart_cardreader_int(struct s_reader *rdr, int32_t restart)
 
 /* Starts or restarts a cardreader with locking. If restart=1, the existing thread is killed before restarting,
    if restart=0 the cardreader is only started. */
+int32_t reader_set_enabled_async(struct s_reader *rdr, int8_t enable)
+{
+	if(!rdr)
+		{ return 0; }
+
+	cs_writelock(__func__, &system_lock);
+	rdr->enable = enable ? 1 : 0;
+	rdr->restart_pending = rdr->enable;
+
+	struct s_client *cl = rdr->client;
+	if(rdr->enable)
+	{
+		if(!cl)
+		{
+			rdr->restart_pending = 0;
+			int32_t result = restart_cardreader_int(rdr, 0);
+			cs_writeunlock(__func__, &system_lock);
+			return result;
+		}
+
+		remove_reader_from_active(rdr);
+		if(!cl->kill)
+			kill_thread(cl);
+	}
+	else if(cl)
+	{
+		remove_reader_from_active(rdr);
+		if(!cl->kill)
+			kill_thread(cl);
+	}
+
+	cs_writeunlock(__func__, &system_lock);
+	return 1;
+}
+
 int32_t restart_cardreader(struct s_reader *rdr, int32_t restart)
 {
 	cs_writelock(__func__, &system_lock);

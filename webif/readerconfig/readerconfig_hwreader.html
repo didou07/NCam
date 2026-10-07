@@ -19,14 +19,37 @@
 ##TPLREADERPINCODE##
 ##TPLREADERCONFIGNANO##
 				<TR><TD><A>Reset after No. ECM:</A></TD><TD><input name="resetcycle" class="short" type="text" maxlength="5" value="##RESETCYCLE##"></TD></TR>
-				<TR><TD><A>Fast Reset Enabled:</A></TD><TD><input name="fastreset_enabled" type="hidden" value="0"><input id="fastresetEnabled" name="fastreset_enabled" type="checkbox" value="1" ##FASTRESETENABLEDCHECKED## onchange="if(this.checked){document.getElementById('oldEcmEnabled').checked=false;}"></TD></TR>
+				<TR><TD><A>Fast Reset Enabled:</A></TD><TD><input name="fastreset_enabled" type="hidden" value="0"><input id="fastresetEnabled" name="fastreset_enabled" type="checkbox" value="1" ##FASTRESETENABLEDCHECKED## onchange="toggleOldEcmOptions();"></TD></TR>
 				<TR><TD><A>Fast Reset Interval:</A></TD><TD><input name="fastreset_interval" class="short" type="text" maxlength="5" value="##FASTRESETINTERVAL##"></TD></TR>
-				<TR><TD><A>Old ECM:</A></TD><TD><input name="old_ecm_enabled" type="hidden" value="0"><input id="oldEcmEnabled" name="old_ecm_enabled" type="checkbox" value="1" ##OLDECMENABLEDCHECKED## onchange="if(this.checked){document.getElementById('fastresetEnabled').checked=false;}"></TD></TR>
-				<TR><TD><A>Old ECM Source:</A></TD><TD><select name="old_ecm_source"><option value="0" ##OLDECMSOURCEAUTOSELECTED##>Auto</option><option value="1" ##OLDECMSOURCEMANUALSELECTED##>Manual</option></select></TD></TR>
-				<TR><TD><A>Old ECM Trigger:</A></TD><TD><select name="old_ecm_trigger"><option value="0" ##OLDECMTRIGGERINTERVALSELECTED##>Interval</option><option value="1" ##OLDECMTRIGGERSUCCESSESSELECTED##>ECM Successes</option></select></TD></TR>
-				<TR><TD><A>Old ECM Interval:</A></TD><TD><input name="old_ecm_interval" class="short" type="text" maxlength="6" value="##OLDECMINTERVAL##"></TD></TR>
-				<TR><TD><A>Old ECM Successes:</A></TD><TD><input name="old_ecm_successes" class="short" type="text" maxlength="8" value="##OLDECMSUCCESSES##"></TD></TR>
-				<TR><TD><A>Old ECM:</A></TD><TD><input name="old_ecm" class="long" type="text" maxlength="2048" value="##OLDECM##"></TD></TR>
+				<TR><TD><A>Old ECM:</A></TD><TD><input name="old_ecm_enabled" type="hidden" value="0"><input id="oldEcmEnabled" name="old_ecm_enabled" type="checkbox" value="1" ##OLDECMENABLEDCHECKED## onchange="toggleOldEcmOptions();"></TD></TR>
+				<TR id="oldEcmSourceRow"><TD><A>ECM Source:</A></TD><TD><select id="oldEcmSource" name="old_ecm_source" onchange="toggleOldEcmOptions();"><option value="0" ##OLDECMSOURCEFIRSTSELECTED##>First successful ECM</option><option value="1" ##OLDECMSOURCEMANUALSELECTED##>Manual ECM</option></select></TD></TR>
+				<TR id="oldEcmManualRow"><TD><A>Manual ECM:</A></TD><TD><input id="oldEcmValue" name="old_ecm" class="long" type="text" maxlength="2048" value="##OLDECM##"></TD></TR>
+				<TR id="oldEcmSuccessesRow"><TD><A>Successful ECMs:</A></TD><TD><input id="oldEcmSuccesses" name="old_ecm_successes" class="short" type="text" maxlength="8" value="##OLDECMSUCCESSES##"><label>before sending Old ECM again</label></TD></TR>
+				<script>
+				function toggleOldEcmOptions() {
+					var oldEnabled = document.getElementById('oldEcmEnabled');
+					var fastEnabled = document.getElementById('fastresetEnabled');
+					var source = document.getElementById('oldEcmSource');
+					var sourceRow = document.getElementById('oldEcmSourceRow');
+					var manualRow = document.getElementById('oldEcmManualRow');
+					var manualEcm = document.getElementById('oldEcmValue');
+					var successesRow = document.getElementById('oldEcmSuccessesRow');
+					var successes = document.getElementById('oldEcmSuccesses');
+					var enabled = !!oldEnabled.checked;
+					if(enabled) {
+						fastEnabled.checked = false;
+					}
+					else if(fastEnabled.checked) {
+						oldEnabled.checked = false;
+					}
+					sourceRow.style.display = enabled ? '' : 'none';
+					manualRow.style.display = (enabled && source.value === '1') ? '' : 'none';
+					manualEcm.disabled = !(enabled && source.value === '1');
+					successesRow.style.display = enabled ? '' : 'none';
+					successes.disabled = !enabled;
+				}
+				window.addEventListener('load', toggleOldEcmOptions);
+				</script>
 				<TR><TD><A>Deprecated:</A></TD><TD><input name="deprecated" type="hidden" value="0"><input name="deprecated" type="checkbox" value="1" ##DEPRECATEDCHECKED##><label></label></TD></TR>
 ##TPLREADERCONFIGCRYPTOWORKS##
 ##TPLREADERCONFIGNAGRA##

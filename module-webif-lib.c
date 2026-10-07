@@ -27,25 +27,6 @@ extern char noncekey[33];
 static struct s_nonce *nonce_first[AUTHNONCEHASHBUCKETS];
 static CS_MUTEX_LOCK nonce_lock[AUTHNONCEHASHBUCKETS];
 
-/* Parses a value in an authentication string by removing all quotes/whitespace. Note that the original array is modified. */
-static char *parse_auth_value(char *value)
-{
-	char *pch = value;
-	char *pch2;
-	value = strstr(value, "=");
-	if(value != NULL)
-	{
-		do
-		{
-			++value;
-		}
-		while(value[0] == ' ' || value[0] == '"');
-		pch = value;
-		for(pch2 = value + cs_strlen(value) - 1; pch2 >= value && (pch2[0] == ' ' || pch2[0] == '"' || pch2[0] == '\r' || pch2[0] == '\n'); --pch2) { pch2[0] = '\0'; }
-	}
-	return pch;
-}
-
 /* Parses the date out of a "If-Modified-Since"-header. Note that the original string is modified. */
 time_t parse_modifiedsince(char *value)
 {
@@ -144,10 +125,10 @@ void calculate_nonce(char *nonce, char *result, char *opaque)
 	{
 		if(now > noncelist->expirationdate)
 		{
-			if(prev) { prev->next = NULL; }
+			if(prev) { prev->next = noncelist->next; }
 			else
 			{
-				nonce_first[bucket] = NULL;
+				nonce_first[bucket] = noncelist->next;
 			}
 			foundexpired = noncelist;
 			break;
@@ -205,99 +186,134 @@ void calculate_nonce(char *nonce, char *result, char *opaque)
 	}
 }
 
-/* Checks if authentication is correct. Returns -1 if not correct, 1 if correct and 2 if nonce isn't valid anymore.
-   Note that authstring will be modified. */
+static int8_t secure_compare(const char *a, const char *b, size_t len)
+{
+	volatile uint8_t diff = 0;
+	for(size_t i = 0; i < len; ++i) { diff |= (uint8_t)a[i] ^ (uint8_t)b[i]; }
+	return diff == 0;
+}
+
+/* Checks if authentication is correct. Returns -1 if not correct, 1 if correct and 2 if nonce isn't valid anymore. */
 int32_t check_auth(char *authstring, char *method, char *path, IN_ADDR_T addr, char *expectednonce, char *opaque)
 {
-	int32_t authok = 0, uriok = 0;
-	char authnonce[(MD5_DIGEST_LENGTH * 2) + 1];
-	memset(authnonce, 0, sizeof(authnonce));
-	char *authnc = "";
-	char *authcnonce = "";
-	char *authresponse = "";
-	char *uri = "";
-	char *username = "";
-	char *expectedPassword = cfg.http_pwd;
-	char *pch = authstring + 22;
-	char *pch2;
-	char *saveptr1 = NULL;
+	char authnonce[(MD5_DIGEST_LENGTH * 2) + 1] = {0};
+	char authnc[9] = {0};
+	char authcnonce[129] = {0};
+	char authresponse[(MD5_DIGEST_LENGTH * 2) + 1] = {0};
+	char uri[4097] = {0};
+	char username[257] = {0};
+	char qop[16] = {0};
+	char algorithm[16] = {0};
+	char localopaque[(MD5_DIGEST_LENGTH * 2) + 1] = {0};
+	uint32_t seen = 0;
+	char *pch, *saveptr1 = NULL;
+	int32_t invalid = 0;
+	enum { F_NONCE=1, F_NC=2, F_CNONCE=4, F_RESPONSE=8, F_URI=16, F_USERNAME=32, F_OPAQUE=64, F_QOP=128, F_ALGORITHM=256 };
 	memset(opaque, 0, (MD5_DIGEST_LENGTH * 2) + 1);
 
-	for(pch = strtok_r(pch, ",", &saveptr1); pch; pch = strtok_r(NULL, ",", &saveptr1))
+	if(!authstring || !method || !path || cs_strlen(authstring) < 22 || cs_strlen(authstring) > 4096 || strncasecmp(authstring, "Authorization: Digest ", 22) != 0 || cs_strlen(path) > 4096)
 	{
-		pch2 = pch;
-		while(pch2[0] == ' ' && pch2[0] != '\0') { ++pch2; }
-		if(strncmp(pch2, "nonce", 5) == 0)
-		{
-			cs_strncpy(authnonce, parse_auth_value(pch2), sizeof(authnonce));
-		}
-		else if(strncmp(pch2, "nc", 2) == 0)
-		{
-			authnc = parse_auth_value(pch2);
-		}
-		else if(strncmp(pch2, "cnonce", 6) == 0)
-		{
-			authcnonce = parse_auth_value(pch2);
-		}
-		else if(strncmp(pch2, "response", 8) == 0)
-		{
-			authresponse = parse_auth_value(pch2);
-		}
-		else if(strncmp(pch2, "uri", 3) == 0)
-		{
-			uri = parse_auth_value(pch2);
-		}
-		else if(strncmp(pch2, "username", 8) == 0)
-		{
-			username = parse_auth_value(pch2);
-		}
-		else if(strncmp(pch2, "opaque", 6) == 0)
-		{
-			char *tmp = parse_auth_value(pch2);
-			cs_strncpy(opaque, tmp, (MD5_DIGEST_LENGTH * 2) + 1);
-		}
+		return -1;
 	}
 
-	if(strncmp(uri, path, cs_strlen(path)) == 0) { uriok = 1; }
-	else
+	for(pch = strtok_r(authstring + 22, ",", &saveptr1); pch; pch = strtok_r(NULL, ",", &saveptr1))
 	{
-		pch2 = uri;
-		for(pch = uri; pch[0] != '\0'; ++pch)
+		char *eq, *name, *value, *end;
+		while(*pch == ' ' || *pch == '\t') { ++pch; }
+		eq = strchr(pch, '=');
+		if(!eq) { invalid = 1; break; }
+		name = pch;
+		end = eq;
+		while(end > name && (end[-1] == ' ' || end[-1] == '\t')) { --end; }
+		*end = '\0';
+		value = eq + 1;
+		while(*value == ' ' || *value == '\t') { ++value; }
+
+		uint32_t bit = 0;
+		char *dst = NULL;
+		size_t dstlen = 0;
+		if(!strcasecmp(name, "nonce")) { bit=F_NONCE; dst=authnonce; dstlen=sizeof(authnonce); }
+		else if(!strcasecmp(name, "nc")) { bit=F_NC; dst=authnc; dstlen=sizeof(authnc); }
+		else if(!strcasecmp(name, "cnonce")) { bit=F_CNONCE; dst=authcnonce; dstlen=sizeof(authcnonce); }
+		else if(!strcasecmp(name, "response")) { bit=F_RESPONSE; dst=authresponse; dstlen=sizeof(authresponse); }
+		else if(!strcasecmp(name, "uri")) { bit=F_URI; dst=uri; dstlen=sizeof(uri); }
+		else if(!strcasecmp(name, "username")) { bit=F_USERNAME; dst=username; dstlen=sizeof(username); }
+		else if(!strcasecmp(name, "opaque")) { bit=F_OPAQUE; dst=localopaque; dstlen=sizeof(localopaque); }
+		else if(!strcasecmp(name, "qop")) { bit=F_QOP; dst=qop; dstlen=sizeof(qop); }
+		else if(!strcasecmp(name, "algorithm")) { bit=F_ALGORITHM; dst=algorithm; dstlen=sizeof(algorithm); }
+		else { continue; }
+		if(seen & bit) { invalid = 1; break; }
+		seen |= bit;
+		if(value[0] == '"')
 		{
-			if(pch[0] == '/') { pch2 = pch; }
-			if(strncmp(pch2, path, cs_strlen(path)) == 0) { uriok = 1; }
-		}
-	}
-	if(uriok == 1 && streq(username, cfg.http_user))
-	{
-		char A1tmp[3 + cs_strlen(username) + cs_strlen(AUTHREALM) + cs_strlen(expectedPassword)];
-		char A1[(MD5_DIGEST_LENGTH * 2) + 1], A2[(MD5_DIGEST_LENGTH * 2) + 1], A3[(MD5_DIGEST_LENGTH * 2) + 1];
-		uint8_t md5tmp[MD5_DIGEST_LENGTH];
-		snprintf(A1tmp, sizeof(A1tmp), "%s:%s:%s", username, AUTHREALM, expectedPassword);
-		char_to_hex(MD5((uint8_t *)A1tmp, cs_strlen(A1tmp), md5tmp), MD5_DIGEST_LENGTH, (uint8_t *)A1);
-
-		char A2tmp[2 + cs_strlen(method) + cs_strlen(uri)];
-		snprintf(A2tmp, sizeof(A2tmp), "%s:%s", method, uri);
-		char_to_hex(MD5((uint8_t *)A2tmp, cs_strlen(A2tmp), md5tmp), MD5_DIGEST_LENGTH, (uint8_t *)A2);
-
-		char A3tmp[10 + cs_strlen(A1) + cs_strlen(A2) + cs_strlen(authnonce) + cs_strlen(authnc) + cs_strlen(authcnonce)];
-		snprintf(A3tmp, sizeof(A3tmp), "%s:%s:%s:%s:auth:%s", A1, authnonce, authnc, authcnonce, A2);
-		char_to_hex(MD5((uint8_t *)A3tmp, cs_strlen(A3tmp), md5tmp), MD5_DIGEST_LENGTH, (uint8_t *)A3);
-
-		if(strcmp(A3, authresponse) == 0)
-		{
-			if(cs_strlen(opaque) != MD5_DIGEST_LENGTH * 2) { calculate_opaque(addr, opaque); }
-			calculate_nonce(authnonce, expectednonce, opaque);
-			if(strcmp(expectednonce, authnonce) == 0) { authok = 1; }
-			else
+			char *close = strrchr(value + 1, '"');
+			if(!close) { invalid = 1; break; }
+			for(end = close + 1; *end; ++end)
 			{
-				authok = 2;
-				cs_log_dbg(D_TRACE, "WebIf: Received stale header from %s (nonce=%s, expectednonce=%s, opaque=%s).", cs_inet_ntoa(addr), authnonce, expectednonce, opaque);
+				if(*end != ' ' && *end != '\t') { invalid = 1; break; }
 			}
+			if(invalid) { break; }
+			*close = '\0';
+			++value;
 		}
+		else
+		{
+			end = value + cs_strlen(value);
+			while(end > value && (end[-1] == ' ' || end[-1] == '\t')) { --end; }
+			*end = '\0';
+			if(strchr(value, '"') != NULL) { invalid = 1; break; }
+		}
+		if(cs_strlen(value) >= dstlen || strpbrk(value, "\r\n") != NULL) { invalid = 1; break; }
+		cs_strncpy(dst, value, dstlen);
 	}
-		if(!authok)
-		{	cs_log("unauthorized access from %s - invalid credentials", cs_inet_ntoa(addr)); }
+
+	if(invalid || !(seen & F_NONCE) || !(seen & F_NC) || !(seen & F_CNONCE) || !(seen & F_RESPONSE) || !(seen & F_URI) || !(seen & F_USERNAME) || !(seen & F_OPAQUE) || !(seen & F_QOP))
+	{
+		return -1;
+	}
+
+	if((seen & F_ALGORITHM) && strcasecmp(algorithm, "MD5") != 0) { return -1; }
+	if(strcasecmp(qop, "auth") != 0) { return -1; }
+	if(cs_strlen(authnonce) != MD5_DIGEST_LENGTH * 2 || cs_strlen(authresponse) != MD5_DIGEST_LENGTH * 2 || cs_strlen(localopaque) != MD5_DIGEST_LENGTH * 2 || cs_strlen(authnc) != 8 || cs_strlen(username) == 0 || cs_strlen(uri) == 0) { return -1; }
+	for(size_t i=0; i<MD5_DIGEST_LENGTH*2; i++)
+	{
+		if(!isxdigit((unsigned char)authnonce[i]) || !isxdigit((unsigned char)authresponse[i]) || !isxdigit((unsigned char)localopaque[i])) { return -1; }
+	}
+	for(size_t i=0; i<sizeof(authnc)-1; i++) { if(!isxdigit((unsigned char)authnc[i])) { return -1; } }
+	if(strcmp(uri, path) != 0 || !streq(username, cfg.http_user)) { return -1; }
+
+	size_t a1len = cs_strlen(username) + 1 + cs_strlen(AUTHREALM) + 1 + cs_strlen(cfg.http_pwd) + 1;
+	size_t a2len = cs_strlen(method) + 1 + cs_strlen(uri) + 1;
+	size_t a3len = 32 + 1 + 32 + 1 + 8 + 1 + cs_strlen(authcnonce) + 1 + 4 + 1 + 32 + 1;
+	char *A1tmp = NULL, *A2tmp = NULL, *A3tmp = NULL;
+	char A1[33], A2[33], A3[33];
+	uint8_t md5tmp[MD5_DIGEST_LENGTH];
+	int32_t authok = 0;
+
+	if(!cs_malloc(&A1tmp, a1len) || !cs_malloc(&A2tmp, a2len) || !cs_malloc(&A3tmp, a3len))
+	{
+		NULLFREE(A1tmp);
+		NULLFREE(A2tmp);
+		NULLFREE(A3tmp);
+		return -1;
+	}
+	snprintf(A1tmp, a1len, "%s:%s:%s", username, AUTHREALM, cfg.http_pwd);
+	char_to_hex(MD5((uint8_t *)A1tmp, cs_strlen(A1tmp), md5tmp), MD5_DIGEST_LENGTH, (uint8_t *)A1);
+	snprintf(A2tmp, a2len, "%s:%s", method, uri);
+	char_to_hex(MD5((uint8_t *)A2tmp, cs_strlen(A2tmp), md5tmp), MD5_DIGEST_LENGTH, (uint8_t *)A2);
+	snprintf(A3tmp, a3len, "%s:%s:%s:%s:auth:%s", A1, authnonce, authnc, authcnonce, A2);
+	char_to_hex(MD5((uint8_t *)A3tmp, cs_strlen(A3tmp), md5tmp), MD5_DIGEST_LENGTH, (uint8_t *)A3);
+	if(secure_compare(A3, authresponse, 32))
+	{
+		cs_strncpy(opaque, localopaque, (MD5_DIGEST_LENGTH * 2) + 1);
+		calculate_nonce(authnonce, expectednonce, opaque);
+		if(strcmp(expectednonce, authnonce) == 0) { authok = 1; }
+		else { authok = 2; }
+	}
+	NULLFREE(A1tmp);
+	NULLFREE(A2tmp);
+	NULLFREE(A3tmp);
+	if(!authok) { cs_log("unauthorized access from %s - invalid credentials", cs_inet_ntoa(addr)); }
 	return authok;
 }
 
@@ -336,12 +352,15 @@ void send_headers(FILE *f, int32_t status, char *title, char *extra, char *mime,
 {
 	time_t now;
 	char timebuf[32];
-	char buf[sizeof(PROTOCOL) + sizeof(SERVER) + cs_strlen(title) + (extra == NULL ? 0 : cs_strlen(extra) + 2) + (mime == NULL ? 0 : cs_strlen(mime) + 2) + 350];
+	char buf[sizeof(PROTOCOL) + sizeof(SERVER) + cs_strlen(title) + (extra == NULL ? 0 : cs_strlen(extra) + 2) + (mime == NULL ? 0 : cs_strlen(mime) + 2) + 450];
 	char *pos = buf;
 	struct tm timeinfo;
 
 	pos += snprintf(pos, sizeof(buf) - (pos - buf), "%s %d %s\r\n", PROTOCOL, status, title);
 	pos += snprintf(pos, sizeof(buf) - (pos - buf), "Server: %s\r\n", SERVER);
+	pos += snprintf(pos, sizeof(buf) - (pos - buf), "X-Content-Type-Options: nosniff\r\n");
+	pos += snprintf(pos, sizeof(buf) - (pos - buf), "X-Frame-Options: SAMEORIGIN\r\n");
+	pos += snprintf(pos, sizeof(buf) - (pos - buf), "Referrer-Policy: same-origin\r\n");
 
 	now = time(NULL);
 	cs_gmtime_r(&now, &timeinfo);
@@ -1100,7 +1119,7 @@ SSL_CTX *SSL_Webif_Init(void)
 	}
 
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	SSL_CTX_set_min_proto_version(ctx, SSL3_VERSION);
+	SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 #elif defined SSL_OP_NO_TLSv1_1
 	SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1);
 #else

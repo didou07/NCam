@@ -6,33 +6,108 @@
 
 extern char *LOG_LIST;
 
-/**
- * creates a lock
- **/
+static void rwlock_timeout_log(CS_MUTEX_LOCK *l, int8_t type)
+{
+#ifdef WITH_DEBUG
+	if(l->name != LOG_LIST)
+		{ cs_log("WARNING lock %s (%s) wait timeout; continuing to wait.", l->name ? l->name : "<destroying>", type == WRITELOCK ? "WRITELOCK" : "READLOCK"); }
+#else
+	(void)l;
+	(void)type;
+#endif
+}
+
+static int8_t rwlock_wait_locked(CS_MUTEX_LOCK *l, int8_t type, int log_errors)
+{
+	const uint32_t wait_ms = l->timeout ? (uint32_t)l->timeout * 1000U : 1000U;
+	while((type == WRITELOCK && (l->writelock || l->readlock)) ||
+	      (type == READLOCK && (l->writelock || l->waiting_writers)))
+	{
+		if(l->destroying || l->flag)
+			{ return 0; }
+		struct timespec ts;
+		add_ms_to_timespec(&ts, (int32_t)wait_ms);
+		int32_t rc = pthread_cond_timedwait(type == WRITELOCK ? &l->writecond : &l->readcond, &l->lock, &ts);
+		if(rc == ETIMEDOUT)
+		{
+			rwlock_timeout_log(l, type);
+		}
+		else if(rc != 0 && log_errors)
+		{
+			cs_log("ERROR: pthread_cond_timedwait on lock %s failed: %d %s", l->name ? l->name : "<destroying>", rc, strerror(rc));
+		}
+	}
+	return !(l->destroying || l->flag);
+}
+
+static void rwlock_acquire(const char *n, CS_MUTEX_LOCK *l, int8_t type, int log_errors)
+{
+	if(!l || !l->name || l->flag)
+		{ return; }
+
+	if(log_errors) { SAFE_MUTEX_LOCK_R(&l->lock, n); }
+	else { SAFE_MUTEX_LOCK_NOLOG_R(&l->lock, n); }
+
+	if(l->destroying || l->flag || !l->name)
+	{
+		if(log_errors) { SAFE_MUTEX_UNLOCK_R(&l->lock, n); }
+		else { SAFE_MUTEX_UNLOCK_NOLOG_R(&l->lock, n); }
+		return;
+	}
+
+	l->users++;
+	int8_t acquired = 0;
+	if(type == WRITELOCK)
+	{
+		l->waiting_writers++;
+		acquired = rwlock_wait_locked(l, type, log_errors);
+		l->waiting_writers--;
+		if(acquired)
+		{ l->writelock = 1; }
+	}
+	else
+	{
+		acquired = rwlock_wait_locked(l, type, log_errors);
+		if(acquired)
+		{ l->readlock++; }
+	}
+
+	if(!acquired)
+	{
+		l->users--;
+		if(l->destroying && l->users == 0)
+			{ SAFE_COND_SIGNAL_R(&l->destroycond, n); }
+	}
+
+	if(log_errors) { SAFE_MUTEX_UNLOCK_R(&l->lock, n); }
+	else { SAFE_MUTEX_UNLOCK_NOLOG_R(&l->lock, n); }
+}
+
 void cs_lock_create(const char *n, CS_MUTEX_LOCK *l, const char *name, uint32_t timeout_ms)
 {
 	memset(l, 0, sizeof(CS_MUTEX_LOCK));
 	l->timeout = timeout_ms / 1000;
+	if(timeout_ms && !l->timeout) { l->timeout = 1; }
 	l->name = name;
 	SAFE_MUTEX_INIT_R(&l->lock, NULL, n);
 	__cs_pthread_cond_init(n, &l->writecond);
 	__cs_pthread_cond_init(n, &l->readcond);
+	__cs_pthread_cond_init(n, &l->destroycond);
 #ifdef WITH_MUTEXDEBUG
 	cs_log_dbg(D_TRACE, "lock %s created", name);
 #endif
 }
 
-/**
- * creates a lock
- **/
 void cs_lock_create_nolog(const char *n, CS_MUTEX_LOCK *l, const char *name, uint32_t timeout_ms)
 {
 	memset(l, 0, sizeof(CS_MUTEX_LOCK));
 	l->timeout = timeout_ms / 1000;
+	if(timeout_ms && !l->timeout) { l->timeout = 1; }
 	l->name = name;
 	SAFE_MUTEX_INIT_NOLOG_R(&l->lock, NULL, n);
 	__cs_pthread_cond_init(n, &l->writecond);
 	__cs_pthread_cond_init(n, &l->readcond);
+	__cs_pthread_cond_init(n, &l->destroycond);
 #ifdef WITH_MUTEXDEBUG
 	cs_log_dbg(D_TRACE, "lock %s created", name);
 #endif
@@ -42,230 +117,130 @@ void cs_lock_destroy(const char *pn, CS_MUTEX_LOCK *l)
 {
 	if(!l || !l->name || l->flag) { return; }
 
-	cs_rwlock_int(pn, l, WRITELOCK);
+	SAFE_MUTEX_LOCK_R(&l->lock, pn);
 #ifdef WITH_DEBUG
 	const char *old_name = l->name;
+#else
+	const char *old_name = NULL;
 #endif
-	l->name = NULL; // No new locks!
-	cs_rwunlock_int(pn, l, WRITELOCK);
-
-	// Do not destroy when having pending locks!
-	int32_t n = (l->timeout / 10) + 2;
-	while((--n > 0) && (l->writelock || l->readlock)) { cs_sleepms(10); }
-
-	cs_rwlock_int(pn, l, WRITELOCK);
-	l->flag++; // No new unlocks!
-	cs_rwunlock_int(pn, l, WRITELOCK);
+	l->destroying = 1;
+	l->name = NULL;
+	SAFE_COND_BROADCAST_R(&l->writecond, pn);
+	SAFE_COND_BROADCAST_R(&l->readcond, pn);
+	while(l->users > 0)
+	{
+		int32_t rc = pthread_cond_wait(&l->destroycond, &l->lock);
+		if(rc != 0)
+			{ break; }
+	}
+	l->flag = 1;
+	SAFE_MUTEX_UNLOCK_R(&l->lock, pn);
 
 #ifdef WITH_DEBUG
-	if(!n && old_name != LOG_LIST)
-		{ cs_log("WARNING lock %s destroy timed out.", old_name); }
+	if(old_name && old_name != LOG_LIST)
+		{ cs_log_dbg(D_TRACE, "lock %s destroyed", old_name); }
 #endif
-
 	pthread_mutex_destroy(&l->lock);
 	pthread_cond_destroy(&l->writecond);
 	pthread_cond_destroy(&l->readcond);
-#ifdef WITH_MUTEXDEBUG
-	cs_log_dbg(D_TRACE, "lock %s destroyed", l->name);
-#endif
+	pthread_cond_destroy(&l->destroycond);
 }
 
 void cs_rwlock_int(const char *n, CS_MUTEX_LOCK *l, int8_t type)
 {
-	struct timespec ts;
-	int8_t ret = 0;
-
-	if(!l || !l->name || l->flag)
-		{ return; }
-
-	SAFE_MUTEX_LOCK_R(&l->lock, n);
-
-	add_ms_to_timespec(&ts, l->timeout * 1000);
-	ts.tv_nsec = 0; // 100% resemble previous code, I consider it wrong
-	if(type == WRITELOCK)
-	{
-		l->writelock++;
-		// if read- or writelock is busy, wait for unlock
-		if(l->writelock > 1 || l->readlock > 0)
-			{ ret = pthread_cond_timedwait(&l->writecond, &l->lock, &ts); }
-	}
-	else
-	{
-		l->readlock++;
-		// if writelock is busy, wait for unlock
-		if(l->writelock > 0)
-			{ ret = pthread_cond_timedwait(&l->readcond, &l->lock, &ts); }
-	}
-
-	if(ret > 0)
-	{
-		// lock wasn't returned within time, assume locking thread to
-		// be stuck or finished, so enforce lock.
-		l->writelock = (type == WRITELOCK) ? 1 : 0;
-		l->readlock = (type == WRITELOCK) ? 0 : 1;
-#ifdef WITH_DEBUG
-		if(l->name != LOG_LIST)
-			{ cs_log("WARNING lock %s (%s) timed out.", l->name, (type == WRITELOCK) ? "WRITELOCK" : "READLOCK"); }
-#endif
-	}
-
-	SAFE_MUTEX_UNLOCK_R(&l->lock, n);
-#ifdef WITH_MUTEXDEBUG
-	//cs_log_dbg(D_TRACE, "lock %s locked", l->name);
-#endif
-	return;
+	rwlock_acquire(n, l, type, 1);
 }
 
 void cs_rwlock_int_nolog(const char *n, CS_MUTEX_LOCK *l, int8_t type)
 {
-	struct timespec ts;
-	int8_t ret = 0;
-
-	if(!l || !l->name || l->flag)
-		{ return; }
-
-	SAFE_MUTEX_LOCK_NOLOG_R(&l->lock, n);
-
-	add_ms_to_timespec(&ts, l->timeout * 1000);
-	ts.tv_nsec = 0; // 100% resemble previous code, I consider it wrong
-	if(type == WRITELOCK)
-	{
-		l->writelock++;
-		// if read- or writelock is busy, wait for unlock
-		if(l->writelock > 1 || l->readlock > 0)
-			{ ret = pthread_cond_timedwait(&l->writecond, &l->lock, &ts); }
-	}
-	else
-	{
-		l->readlock++;
-		// if writelock is busy, wait for unlock
-		if(l->writelock > 0)
-			{ ret = pthread_cond_timedwait(&l->readcond, &l->lock, &ts); }
-	}
-
-	if(ret > 0)
-	{
-		// lock wasn't returned within time, assume locking thread to
-		// be stuck or finished, so enforce lock.
-		l->writelock = (type == WRITELOCK) ? 1 : 0;
-		l->readlock = (type == WRITELOCK) ? 0 : 1;
-#ifdef WITH_DEBUG
-		if(l->name != LOG_LIST)
-			{ cs_log("WARNING lock %s (%s) timed out.", l->name, (type == WRITELOCK) ? "WRITELOCK" : "READLOCK"); }
-#endif
-	}
-
-	SAFE_MUTEX_UNLOCK_NOLOG_R(&l->lock, n);
-#ifdef WITH_MUTEXDEBUG
-	//cs_log_dbg(D_TRACE, "lock %s locked", l->name);
-#endif
-	return;
+	rwlock_acquire(n, l, type, 0);
 }
 
 void cs_rwunlock_int(const char *n, CS_MUTEX_LOCK *l, int8_t type)
 {
-
 	if(!l || l->flag) { return; }
-
 	SAFE_MUTEX_LOCK_R(&l->lock, n);
-
 	if(type == WRITELOCK)
-		{ l->writelock--; }
-	else
-		{ l->readlock--; }
-
-	if(l->writelock < 0) { l->writelock = 0; }
-	if(l->readlock < 0) { l->readlock = 0; }
-
-	// waiting writelocks always have priority. If one is waiting, signal it
-	if(l->writelock)
-		{ SAFE_COND_SIGNAL_R(&l->writecond, n); }
-	// Otherwise signal a waiting readlock (if any)
-	else if(l->readlock && type != READLOCK)
-		{ SAFE_COND_BROADCAST_R(&l->readcond, n); }
-
-	SAFE_MUTEX_UNLOCK_R(&l->lock, n);
-
-#ifdef WITH_MUTEXDEBUG
-#ifdef WITH_DEBUG
-	if(l->name != LOG_LIST)
 	{
-		const char *typetxt[] = { "", "write", "read" };
-		cs_log_dbg(D_TRACE, "%slock %s: released", typetxt[type], l->name);
+		if(l->writelock > 0) { l->writelock = 0; }
+		if(l->waiting_writers)
+			{ SAFE_COND_SIGNAL_R(&l->writecond, n); }
+		else
+			{ SAFE_COND_BROADCAST_R(&l->readcond, n); }
+		if(l->users > 0) { l->users--; }
+		if(l->destroying && l->users == 0)
+			{ SAFE_COND_SIGNAL_R(&l->destroycond, n); }
 	}
-#endif
-#endif
+	else
+	{
+		if(l->readlock > 0) { l->readlock--; }
+		if(l->readlock == 0 && l->waiting_writers)
+			{ SAFE_COND_SIGNAL_R(&l->writecond, n); }
+		else if(!l->waiting_writers)
+			{ SAFE_COND_BROADCAST_R(&l->readcond, n); }
+		if(l->users > 0) { l->users--; }
+		if(l->destroying && l->users == 0)
+			{ SAFE_COND_SIGNAL_R(&l->destroycond, n); }
+	}
+	SAFE_MUTEX_UNLOCK_R(&l->lock, n);
 }
 
 void cs_rwunlock_int_nolog(const char *n, CS_MUTEX_LOCK *l, int8_t type)
 {
-
 	if(!l || l->flag) { return; }
-
 	SAFE_MUTEX_LOCK_NOLOG_R(&l->lock, n);
-
 	if(type == WRITELOCK)
-		{ l->writelock--; }
-	else
-		{ l->readlock--; }
-
-	if(l->writelock < 0) { l->writelock = 0; }
-	if(l->readlock < 0) { l->readlock = 0; }
-
-	// waiting writelocks always have priority. If one is waiting, signal it
-	if(l->writelock)
-		{ SAFE_COND_SIGNAL_R(&l->writecond, n); }
-	// Otherwise signal a waiting readlock (if any)
-	else if(l->readlock && type != READLOCK)
-		{ SAFE_COND_BROADCAST_R(&l->readcond, n); }
-
-	SAFE_MUTEX_UNLOCK_NOLOG_R(&l->lock, n);
-
-#ifdef WITH_MUTEXDEBUG
-#ifdef WITH_DEBUG
-	if(l->name != LOG_LIST)
 	{
-		const char *typetxt[] = { "", "write", "read" };
-		cs_log_dbg(D_TRACE, "%slock %s: released", typetxt[type], l->name);
+		if(l->writelock > 0) { l->writelock = 0; }
+		if(l->waiting_writers)
+			{ SAFE_COND_SIGNAL_R(&l->writecond, n); }
+		else
+			{ SAFE_COND_BROADCAST_R(&l->readcond, n); }
 	}
-#endif
-#endif
+	else
+	{
+		if(l->readlock > 0) { l->readlock--; }
+		if(l->readlock == 0 && l->waiting_writers)
+			{ SAFE_COND_SIGNAL_R(&l->writecond, n); }
+		else if(!l->waiting_writers)
+			{ SAFE_COND_BROADCAST_R(&l->readcond, n); }
+	}
+	if(l->users > 0) { l->users--; }
+	if(l->destroying && l->users == 0)
+		{ SAFE_COND_SIGNAL_R(&l->destroycond, n); }
+	SAFE_MUTEX_UNLOCK_NOLOG_R(&l->lock, n);
 }
 
 int8_t cs_try_rwlock_int(const char *n, CS_MUTEX_LOCK *l, int8_t type)
 {
-	if(!l || !l->name || l->flag)
-		{ return 0; }
-
+	if(!l || l->flag)
+		{ return 1; }
 	int8_t status = 0;
-
 	SAFE_MUTEX_LOCK_R(&l->lock, n);
-
+	if(l->destroying || !l->name)
+	{
+		SAFE_MUTEX_UNLOCK_R(&l->lock, n);
+		return 1;
+	}
+	l->users++;
 	if(type == WRITELOCK)
 	{
-		if(l->writelock || l->readlock)
+		if(l->writelock || l->readlock || l->waiting_writers)
 			{ status = 1; }
 		else
-			{ l->writelock++; }
+			{ l->writelock = 1; }
 	}
 	else
 	{
-		if(l->writelock)
+		if(l->writelock || l->waiting_writers)
 			{ status = 1; }
 		else
 			{ l->readlock++; }
 	}
-
-	SAFE_MUTEX_UNLOCK_R(&l->lock, n);
-
-#ifdef WITH_MUTEXDEBUG
-#ifdef WITH_DEBUG
-	if(l->name != LOG_LIST)
+	if(status)
 	{
-		const char *typetxt[] = { "", "write", "read" };
-		cs_log_dbg(D_TRACE, "try_%slock %s: status=%d", typetxt[type], l->name, status);
+		if(l->users > 0) { l->users--; }
 	}
-#endif
-#endif
+	SAFE_MUTEX_UNLOCK_R(&l->lock, n);
 	return status;
 }

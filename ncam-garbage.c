@@ -102,7 +102,7 @@ static pthread_mutex_t sleep_cond_mutex;
 
 static void garbage_collector(void)
 {
-	int32_t i,j;
+	int32_t i;
 	struct cs_garbage *garbage, *next, *prev, *first;
 	set_thread_name(__func__);
 	int32_t timeout_time = 2 * cfg.ctimeout / 1000 + 6;
@@ -113,35 +113,30 @@ static void garbage_collector(void)
 
 		for(i = 0; i < HASH_BUCKETS; ++i)
 		{
-			j = 0;
+			garbage = NULL;
 			cs_writelock(__func__, &garbage_lock[i]);
 			first = garbage_first[i];
+			prev = NULL;
 
-			for(garbage = first, prev = NULL; garbage; prev = garbage, garbage = garbage->next, j++)
+			/* Entries are prepended, so timestamps become older while walking
+			 * toward the tail. Once the first expired entry is found, the whole
+			 * remaining tail is safe to detach and free outside the lock. */
+			for(next = first; next; next = next->next)
 			{
-				if(j == 2)
+				if(next->time < deltime)
 				{
-					j++;
-					cs_writeunlock(__func__, &garbage_lock[i]);
-				}
-
-				if(garbage->time < deltime) // all following elements are too new
-				{
+					garbage = next;
 					if(prev)
-					{
-						prev->next = NULL;
-					}
+						{ prev->next = NULL; }
 					else
-					{
-						garbage_first[i] = NULL;
-					}
+						{ garbage_first[i] = NULL; }
 					break;
 				}
+				prev = next;
 			}
 
 			cs_writeunlock(__func__, &garbage_lock[i]);
 
-			// list has been taken out before so we don't need a lock here anymore!
 			while(garbage)
 			{
 				next = garbage->next;

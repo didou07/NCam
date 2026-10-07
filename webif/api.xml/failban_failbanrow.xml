@@ -1,1 +1,1 @@
-		<ip ipinteger="##INTIP##" user="##VIOLATIONUSER##" count="##VIOLATIONCOUNT##" date="##VIOLATIONDATE##" secondsleft="">##IPADDRESS##</ip>
+		<ip ipinteger="##INTIP##" user="##VIOLATIONUSER##" count="##VIOLATIONCOUNT##" date="##VIOLATIONDATE##" secondsleft="" country="##COUNTRYCODE##" countryname="##COUNTRYNAME##">##IPADDRESS##</ip>

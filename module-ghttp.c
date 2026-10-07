@@ -36,9 +36,50 @@ typedef struct
 } s_ca_context;
 
 static LLIST *ghttp_ignored_contexts;
+static pthread_mutex_t ghttp_global_mutex = PTHREAD_MUTEX_INITIALIZER;
 #ifdef WITH_SSL
 static SSL_CTX *ghttp_ssl_context;
 #endif
+
+static bool ghttp_init_globals(void)
+{
+	bool ok = true;
+	SAFE_MUTEX_LOCK(&ghttp_global_mutex);
+	if(!ghttp_ignored_contexts)
+	{
+		ghttp_ignored_contexts = ll_create("ignored contexts");
+		if(!ghttp_ignored_contexts)
+		{
+			ok = false;
+		}
+	}
+#ifdef WITH_SSL
+	if(ok && !ghttp_ssl_context)
+	{
+		ghttp_ssl_context = SSL_CTX_new(SSLv23_client_method());
+		if(!ghttp_ssl_context)
+		{
+			ERR_print_errors_fp(stderr);
+#if OPENSSL_VERSION_NUMBER < 0x1010005fL
+			ERR_remove_state(0);
+#endif
+			ok = false;
+		}
+	}
+#endif
+	SAFE_MUTEX_UNLOCK(&ghttp_global_mutex);
+	return ok;
+}
+
+static void ghttp_clear_ignored_contexts(void)
+{
+	SAFE_MUTEX_LOCK(&ghttp_global_mutex);
+	if(ghttp_ignored_contexts)
+	{
+		ll_clear_data(ghttp_ignored_contexts);
+	}
+	SAFE_MUTEX_UNLOCK(&ghttp_global_mutex);
+}
 
 static int32_t _ghttp_post_ecmdata(struct s_client *client, ECM_REQUEST *er);
 
@@ -47,10 +88,11 @@ static bool _ssl_connect(struct s_client *client, int32_t fd)
 {
 	s_ghttp *context = (s_ghttp *)client->ghttp;
 
-	if(context->ssl_handle) // cleanup previous
+	if(context->ssl_handle)
 	{
 		SSL_shutdown(context->ssl_handle);
 		SSL_free(context->ssl_handle);
+		context->ssl_handle = NULL;
 	}
 
 	cs_log_dbg(D_CLIENT, "%s: trying ssl...", client->reader->label);
@@ -70,6 +112,8 @@ static bool _ssl_connect(struct s_client *client, int32_t fd)
 #if OPENSSL_VERSION_NUMBER < 0x1010005fL
 		ERR_remove_state(0);
 #endif
+		SSL_free(context->ssl_handle);
+		context->ssl_handle = NULL;
 		return false;
 	}
 	if(SSL_connect(context->ssl_handle) != 1)
@@ -78,15 +122,13 @@ static bool _ssl_connect(struct s_client *client, int32_t fd)
 #if OPENSSL_VERSION_NUMBER < 0x1010005fL
 		ERR_remove_state(0);
 #endif
+		SSL_free(context->ssl_handle);
+		context->ssl_handle = NULL;
+		return false;
 	}
 
-	if(context->ssl_handle)
-	{
-		cs_log_dbg(D_CLIENT, "%s: ssl established", client->reader->label);
-		return true;
-	}
-
-	return false;
+	cs_log_dbg(D_CLIENT, "%s: ssl established", client->reader->label);
+	return true;
 }
 #endif
 
@@ -95,17 +137,11 @@ int32_t ghttp_client_init(struct s_client *cl)
 	int32_t handle;
 	char *str = NULL;
 
-	ghttp_ignored_contexts = ll_create("ignored contexts");
-#ifdef WITH_SSL
-	ghttp_ssl_context = SSL_CTX_new(SSLv23_client_method());
-	if(ghttp_ssl_context == NULL)
+	if(!ghttp_init_globals())
 	{
-		ERR_print_errors_fp(stderr);
-#if OPENSSL_VERSION_NUMBER < 0x1010005fL
-		ERR_remove_state(0);
-#endif
+		cs_log("%s: failed to initialize ghttp global state", cl->reader->label);
+		return -1;
 	}
-#endif
 
 	if(cl->reader->r_port == 0)
 	{
@@ -142,11 +178,27 @@ int32_t ghttp_client_init(struct s_client *cl)
 	{
 		if(!cs_malloc(&(cl->ghttp), sizeof(s_ghttp)))
 		{
+			network_tcp_connection_close(cl->reader, "ghttp alloc failed");
 			return -1;
 		}
-		memset(cl->ghttp, 0, sizeof(s_ghttp));
-		((s_ghttp *)cl->ghttp)->post_contexts = ll_create("post contexts");
-		((s_ghttp *)cl->ghttp)->ecm_q = ll_create("ecm queue");
+		s_ghttp *context = (s_ghttp *)cl->ghttp;
+		if(pthread_mutex_init(&context->conn_mutex, NULL) != 0)
+		{
+			NULLFREE(cl->ghttp);
+			network_tcp_connection_close(cl->reader, "ghttp mutex init failed");
+			return -1;
+		}
+		context->post_contexts = ll_create("post contexts");
+		context->ecm_q = ll_create("ecm queue");
+		if(!context->post_contexts || !context->ecm_q)
+		{
+			ll_destroy_data(&context->post_contexts);
+			ll_destroy(&context->ecm_q);
+			pthread_mutex_destroy(&context->conn_mutex);
+			NULLFREE(cl->ghttp);
+			network_tcp_connection_close(cl->reader, "ghttp queue alloc failed");
+			return -1;
+		}
 	}
 	else
 	{
@@ -195,9 +247,11 @@ static int32_t ghttp_send_int(struct s_client *client, uint8_t *buf, int32_t l)
 	cs_log_dbg(D_CLIENT, "%s: sending %d bytes", client->reader->label, l);
 	if(!client->pfd)
 	{
-		// disconnected? try reinit.
 		cs_log_dbg(D_CLIENT, "%s: disconnected?", client->reader->label);
-		ghttp_client_init(client);
+		if(ghttp_client_init(client) < 0 || !client->pfd)
+		{
+			return -1;
+		}
 	}
 
 #ifdef WITH_SSL
@@ -230,27 +284,33 @@ static int32_t ghttp_recv_int(struct s_client *client, uint8_t *buf, int32_t l)
 		return -1;
 	}
 
+	if(l <= 0)
+	{
+		return -1;
+	}
+
+	int32_t read_len = (l > 1) ? l - 1 : l;
 	if(client->reader->ghttp_use_ssl)
 	{
 #ifdef WITH_SSL
-		n = SSL_read(context->ssl_handle, buf, l);
+		n = SSL_read(context->ssl_handle, buf, read_len);
 #endif
 	}
 	else
 	{
-		n = cs_recv(client->pfd, buf, l, 0);
+		n = cs_recv(client->pfd, buf, read_len, 0);
 	}
 
 	if(n > 0)
 	{
+		buf[n] = '\0';
 		cs_log_dbg(D_CLIENT, "%s: received %d bytes from %s", client->reader->label, n, remote_txt());
 		client->last = time((time_t *)0);
 
 		if(n > 400)
 		{
-			buf[n] = '\0';
 			cs_log_dbg(D_CLIENT, "%s: unexpected reply size %d - %s", client->reader->label, n, buf);
-			return -1; // assumes google error, disconnects
+			return -1;
 		}
 	}
 
@@ -326,17 +386,39 @@ static void _set_pid_status(LLIST *ca_contexts, uint16_t onid, uint16_t tsid, ui
 	}
 }
 
-static void _set_pids_status(LLIST *ca_contexts, uint16_t onid, uint16_t tsid, uint16_t sid, uint8_t *buf, int len)
+static void ghttp_set_pids_status(uint16_t onid, uint16_t tsid, uint16_t sid, uint8_t *buf, int len)
 {
 	int8_t offs = 0;
 	uint16_t pid = 0;
 
-	while(offs < len)
+	if(!buf || len < 2)
 	{
-		pid = b2i(2, buf + offs);
-		offs += 2;
-		_set_pid_status(ca_contexts, onid, tsid, sid, pid);
+		return;
 	}
+
+	SAFE_MUTEX_LOCK(&ghttp_global_mutex);
+	if(ghttp_ignored_contexts)
+	{
+		while(offs + 1 < len)
+		{
+			pid = b2i(2, buf + offs);
+			offs += 2;
+			_set_pid_status(ghttp_ignored_contexts, onid, tsid, sid, pid);
+		}
+	}
+	SAFE_MUTEX_UNLOCK(&ghttp_global_mutex);
+}
+
+static int ghttp_ignored_count(void)
+{
+	int count = 0;
+	SAFE_MUTEX_LOCK(&ghttp_global_mutex);
+	if(ghttp_ignored_contexts)
+	{
+		count = ll_count(ghttp_ignored_contexts);
+	}
+	SAFE_MUTEX_UNLOCK(&ghttp_global_mutex);
+	return count;
 }
 
 static bool _swap_hosts(s_ghttp *context)
@@ -351,7 +433,7 @@ static bool _swap_hosts(s_ghttp *context)
 	context->fallback_id = tmp;
 	NULLFREE(context->session_id);
 	ll_clear(context->ecm_q);
-	ll_clear_data(ghttp_ignored_contexts);
+	ghttp_clear_ignored_contexts();
 	return true;
 }
 
@@ -364,7 +446,12 @@ static char *_get_header_substr(uint8_t *buf, const char *start, const char *end
 	}
 
 	data += cs_strlen(start);
-	int len = strstr(data, end) - data;
+	char *finish = strstr(data, end);
+	if(!finish)
+	{
+		return NULL;
+	}
+	int len = (int)(finish - data);
 	if(len <= 0)
 	{
 		return NULL;
@@ -421,7 +508,26 @@ static int32_t ghttp_recv_chk(struct s_client *client, uint8_t *dcw, int32_t *rc
 	rcode = _get_int_header(buf, "HTTP/1.1 ");
 	clen = _get_int_header(buf, "Content-Length: ");
 
-	content = (uint8_t *)(strstr(data, "\r\n\r\n") + 4);
+	char *content_start = strstr(data, "\r\n\r\n");
+	if(!content_start)
+	{
+		cs_log_dbg(D_CLIENT, "%s: malformed http response without header terminator", client->reader->label);
+		network_tcp_connection_close(client->reader, "receive error");
+		NULLFREE(context->session_id);
+		ll_clear(context->ecm_q);
+		return -1;
+	}
+	content = (uint8_t *)(content_start + 4);
+	int32_t content_offset = (int32_t)(content - buf);
+	if(content_offset > n || (clen >= 0 && clen > n - content_offset))
+	{
+		cs_log_dbg(D_CLIENT, "%s: truncated http body content-length=%d available=%d",
+				client->reader->label, clen, n > content_offset ? n - content_offset : 0);
+		network_tcp_connection_close(client->reader, "truncated response");
+		NULLFREE(context->session_id);
+		ll_clear(context->ecm_q);
+		return -1;
+	}
 
 	hdrstr = _get_header_substr(buf, "ETag: \"", "\"\r\n");
 	if(hdrstr)
@@ -439,7 +545,7 @@ static int32_t ghttp_recv_chk(struct s_client *client, uint8_t *dcw, int32_t *rc
 		{
 			cs_log_dbg(D_CLIENT, "%s: redirected...", client->reader->label);
 			NULLFREE(context->session_id);
-			ll_clear_data(ghttp_ignored_contexts);
+			ghttp_clear_ignored_contexts();
 			ll_clear(context->ecm_q);
 			return -1;
 		}
@@ -547,7 +653,7 @@ static int32_t ghttp_recv_chk(struct s_client *client, uint8_t *dcw, int32_t *rc
 
 			if(sscanf(hdrstr, "%4x-%4x-%4x", &onid, &tsid, &sid) == 3)
 			{
-				_set_pids_status(ghttp_ignored_contexts, onid, tsid, sid, content, clen);
+				ghttp_set_pids_status(onid, tsid, sid, content, clen);
 			}
 			NULLFREE(hdrstr);
 			return -1;
@@ -559,9 +665,9 @@ static int32_t ghttp_recv_chk(struct s_client *client, uint8_t *dcw, int32_t *rc
 	if(data)
 	{
 		cs_log_dbg(D_CLIENT, "%s: clearing local ignore list (size %d)",
-				client->reader->label, ll_count(ghttp_ignored_contexts));
+				client->reader->label, ghttp_ignored_count());
 
-		ll_clear_data(ghttp_ignored_contexts);
+		ghttp_clear_ignored_contexts();
 	}
 
 	// switch back to cache get after rapid ecm response (arbitrary atm), only effect is a slight bw save for client
@@ -649,6 +755,11 @@ static int32_t _ghttp_http_get(struct s_client *client, uint32_t hash, int odd)
 		}
 	}
 
+	if(ret < 0 || ret >= (int32_t)sizeof(req))
+	{
+		return -1;
+	}
+
 	ret = ghttp_send(client, req, ret);
 
 	return ret;
@@ -684,6 +795,12 @@ static int32_t _ghttp_post_ecmdata(struct s_client *client, ECM_REQUEST *er)
 						er->onid, er->tsid, er->pid, er->srvid, er->caid, er->prid, context->host_id, er->ecmlen);
 		}
 	}
+	if(ret < 0 || (size_t)ret > sizeof(req) - er->ecmlen)
+	{
+		cs_log_dbg(D_CLIENT, "%s: ecm request too large (%d + %d)", client->reader->label, ret, er->ecmlen);
+		return -1;
+	}
+
 	end = req + ret;
 	memcpy(end, er->ecm, er->ecmlen);
 
@@ -698,24 +815,22 @@ static int32_t _ghttp_post_ecmdata(struct s_client *client, ECM_REQUEST *er)
 static bool _is_pid_ignored(ECM_REQUEST *er)
 {
 	s_ca_context *ignore;
+	bool found = false;
 	if(cs_malloc(&ignore, sizeof(s_ca_context)))
 	{
 		ignore->onid = er->onid;
 		ignore->tsid = er->tsid;
 		ignore->sid = er->srvid;
 		ignore->pid = er->pid;
-
-		if(ll_contains_data(ghttp_ignored_contexts, ignore, sizeof(s_ca_context)))
+		SAFE_MUTEX_LOCK(&ghttp_global_mutex);
+		if(ghttp_ignored_contexts)
 		{
-			NULLFREE(ignore);
-			return true;
+			found = ll_contains_data(ghttp_ignored_contexts, ignore, sizeof(s_ca_context));
 		}
-		else
-		{
-			NULLFREE(ignore);
-		}
+		SAFE_MUTEX_UNLOCK(&ghttp_global_mutex);
+		NULLFREE(ignore);
 	}
-	return false;
+	return found;
 }
 
 static int32_t ghttp_send_ecm(struct s_client *client, ECM_REQUEST *er)
@@ -730,9 +845,22 @@ static int32_t ghttp_send_ecm(struct s_client *client, ECM_REQUEST *er)
 		return -1;
 	}
 
-	if(!context->host_id) { context->host_id = (uint8_t *)cs_strdup(client->reader->device); }
+	if(!context || !context->post_contexts || !context->ecm_q)
+	{
+		return -1;
+	}
 
-	ll_append(context->ecm_q, er);
+	if(!context->host_id) { context->host_id = (uint8_t *)cs_strdup(client->reader->device); }
+	if(!context->host_id)
+	{
+		return -1;
+	}
+
+	if(!ll_append(context->ecm_q, er))
+	{
+		cs_log_dbg(D_CLIENT, "%s: failed to queue ecm", client->reader->label);
+		return -1;
+	}
 	if(ll_count(context->ecm_q) > 1)
 	{
 		cs_log_dbg(D_CLIENT, "%s: %d simultaneous ecms...", client->reader->label, ll_count(context->ecm_q));
@@ -755,8 +883,6 @@ static void ghttp_cleanup(struct s_client *client)
 {
 	s_ghttp *context = (s_ghttp *)client->ghttp;
 
-	ll_destroy_data(&ghttp_ignored_contexts);
-
 	if(context)
 	{
 		NULLFREE(context->session_id);
@@ -764,6 +890,7 @@ static void ghttp_cleanup(struct s_client *client)
 		NULLFREE(context->fallback_id);
 		ll_destroy(&context->ecm_q);
 		ll_destroy_data(&context->post_contexts);
+		pthread_mutex_destroy(&context->conn_mutex);
 
 #ifdef WITH_SSL
 		if(context->ssl_handle)
@@ -771,7 +898,6 @@ static void ghttp_cleanup(struct s_client *client)
 			SSL_shutdown(context->ssl_handle);
 			SSL_free(context->ssl_handle);
 		}
-		SSL_CTX_free(ghttp_ssl_context);
 #endif
 		NULLFREE(context);
 	}

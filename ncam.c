@@ -1,6 +1,7 @@
 #define MODULE_LOG_PREFIX "main"
 
 #include "globals.h"
+#include "ncam-country.h"
 #include <getopt.h>
 
 #include "csctapi/cardreaders.h"
@@ -1463,23 +1464,25 @@ static void *reader_check(void)
 	cs_pthread_cond_init(__func__, &reader_check_sleep_cond_mutex, &reader_check_sleep_cond);
 	while(!exit_oscam)
 	{
+		struct s_reader *autorestart_rdr = NULL;
+		cs_readlock(__func__, &clientlist_lock);
 		for(cl = first_client->next; cl ; cl = cl->next)
 		{
 			if(!cl->thread_active)
 				{ client_check_status(cl); }
-			rdr=cl->reader;
-			if (rdr && rdr->autorestartseconds
-			    && (cl->login + (time_t)rdr->autorestartseconds) < time(NULL)){
-				if(rdr->enable){
-					rdr->enable=0;
-					kill_thread(cl);
-					cs_sleepms(cfg.reader_restart_seconds * 1000);
-				}
-				rdr->enable=1;
-				restart_cardreader(rdr, 1);
+			rdr = cl->reader;
+			if(rdr && rdr->autorestartseconds && (cl->login + (time_t)rdr->autorestartseconds) < time(NULL))
+			{
+				autorestart_rdr = rdr;
+				break;
 			}
 		}
+		cs_readunlock(__func__, &clientlist_lock);
 
+		if(autorestart_rdr)
+			{ restart_cardreader(autorestart_rdr, 1); }
+
+		struct s_reader *dead_rdr = NULL;
 		cs_readlock(__func__, &readerlist_lock);
 		for(rdr = first_active_reader; rdr; rdr = rdr->next)
 		{
@@ -1487,12 +1490,19 @@ static void *reader_check(void)
 			{
 				cl = rdr->client;
 				if(!cl || cl->kill)
-					{ restart_cardreader(rdr, 0); }
-				else if(!cl->thread_active)
+				{
+					dead_rdr = rdr;
+					break;
+				}
+				if(!cl->thread_active)
 					{ client_check_status(cl); }
 			}
 		}
 		cs_readunlock(__func__, &readerlist_lock);
+
+		if(dead_rdr)
+			{ restart_cardreader(dead_rdr, 0); }
+
 		sleepms_on_cond(__func__, &reader_check_sleep_cond_mutex, &reader_check_sleep_cond, 1000);
 	}
 	return NULL;
@@ -1921,6 +1931,7 @@ int32_t main(int32_t argc, char *argv[])
 	init_ecm_cache();
 #endif
 	cs_init_log();
+	ncam_country_init();
 	init_machine_info();
 	init_check();
 	if(!ncam_pidfile && cfg.pidfile)
@@ -2088,11 +2099,11 @@ int32_t main(int32_t argc, char *argv[])
 	// sleep a bit, so hopefully all threads are stopped when we continue
 	cs_sleepms(200);
 
+	cacheex_free_hitcache();
 	free_cache();
 #ifdef CS_CACHEEX_AIO
 	free_ecm_cache();
 #endif
-	cacheex_free_hitcache();
 	webif_tpls_free();
 	init_free_userdb(cfg.account);
 	cfg.account = NULL;

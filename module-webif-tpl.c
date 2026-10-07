@@ -204,6 +204,7 @@ static char *tpl_addTmp(struct templatevars *vars, char *value)
 void tpl_printf(struct templatevars *vars, uint8_t addmode, const char *varname, const char *fmtstring, ...)
 {
 	uint32_t needed;
+	if(!vars || !fmtstring) { return; }
 	char test[1];
 	va_list argptr;
 

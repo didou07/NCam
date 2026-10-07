@@ -530,6 +530,8 @@ SRC-y += ncam-ecm.c
 SRC-y += ncam-emm.c
 SRC-y += ncam-emm-cache.c
 SRC-y += ncam-failban.c
+SRC-y += ncam-country.c
+SRC-y += ncam-mmdb.c
 SRC-y += ncam-files.c
 SRC-y += ncam-garbage.c
 SRC-y += ncam-lock.c
@@ -558,7 +560,7 @@ SRC := $(subst config.c,$(OBJDIR)/config.c,$(SRC))
 # starts the compilation.
 all:
 	@./config.sh --use-flags "$(USE_FLAGS)" --objdir "$(OBJDIR)" --make-config.mak
-	@-mkdir -p $(OBJDIR)/cscrypt $(OBJDIR)/csctapi $(OBJDIR)/minilzo $(OBJDIR)/webif $(OBJDIR)/signing
+	@-mkdir -p $(OBJDIR)/cscrypt $(OBJDIR)/csctapi $(OBJDIR)/minilzo $(OBJDIR)/webif $(OBJDIR)/signing Distribution
 	@-printf "\
 +-------------------------------------------------------------------------------\n\
 | NCam ver: $(VER) rev: $(REV) target: $(TARGET)\n\

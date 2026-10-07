@@ -16,7 +16,9 @@ static int32_t radegast_connect(void);
 
 static int32_t radegast_send(struct s_client *client, uint8_t *buf)
 {
+	if(!client || !buf) { return -1; }
 	int32_t l = buf[1] + 2;
+	if(l < 2 || l > 257) { return -1; }
 	return (send(client->pfd, buf, l, 0));
 }
 
@@ -35,8 +37,8 @@ static int32_t radegast_recv(struct s_client *client, uint8_t *buf, int32_t l)
 		{
 			cs_log_dump_dbg(D_CLIENT, buf, n, "radegast: received %d bytes from %s", n, remote_txt());
 			client->last = time((time_t *) 0);
-			if((buf[0] == 0x02) && (buf[1] == 0x12) && (buf[2] == 0x05) && (buf[3] == 0x10)) { return (n); }  // dcw received
-			else if((buf[0] == 0x02) && (buf[1] == 0x02) && (buf[2] == 0x04) && (buf[3] == 0x00)) { return (n); }  // dcw no found
+			if(n >= 4 && (buf[0] == 0x02) && (buf[1] == 0x12) && (buf[2] == 0x05) && (buf[3] == 0x10)) { return (n); }  // dcw received
+			else if(n >= 4 && (buf[0] == 0x02) && (buf[1] == 0x02) && (buf[2] == 0x04) && (buf[3] == 0x00)) { return (n); }  // dcw no found
 			else if((buf[0] == 0x81) && (buf[1] == 0x00)) { return (n); }  // cmd unknown
 			else { n = -1; }// no cmd radegast disconnect
 		}
@@ -44,9 +46,9 @@ static int32_t radegast_recv(struct s_client *client, uint8_t *buf, int32_t l)
 	return (n);
 }
 
-static int32_t radegast_recv_chk(struct s_client *client, uint8_t *dcw, int32_t *rc, uint8_t *buf, int32_t UNUSED(n))
+static int32_t radegast_recv_chk(struct s_client *client, uint8_t *dcw, int32_t *rc, uint8_t *buf, int32_t n)
 {
-	if((buf[0] == 2) && (buf[1] == 0x12))
+	if(n >= 20 && (buf[0] == 2) && (buf[1] == 0x12))
 	{
 		char tmp_dbg[33];
 		memcpy(dcw, buf + 4, 16);

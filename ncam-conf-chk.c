@@ -578,12 +578,15 @@ void chk_ecm_hdr_whitelist(char *value, ECM_HDR_WHITELIST *ecm_hdr_whitelist)
 		{
 			hdr_ptr = trim(hdr_ptr);
 			d.len = cs_strlen(hdr_ptr);
-			if (d.len / 2 > sizeof(d.header))
+			if(d.len & 1)
+				{ continue; }
+			if(d.len / 2 > sizeof(d.header))
 				d.len = sizeof(d.header) * 2;
-			if (d.len > 1)
+			if(d.len > 1)
 			{
-				key_atob_l(hdr_ptr, d.header, d.len);
-				ecm_hdr_whitelist_add(ecm_hdr_whitelist, &d);
+				memset(d.header, 0, sizeof(d.header));
+				if(key_atob_l(hdr_ptr, d.header, d.len) == 0)
+					{ ecm_hdr_whitelist_add(ecm_hdr_whitelist, &d); }
 			}
 		}
 	}
@@ -592,10 +595,13 @@ void chk_ecm_hdr_whitelist(char *value, ECM_HDR_WHITELIST *ecm_hdr_whitelist)
 /* Clears the s_ip structure provided. The pointer will be set to NULL so everything is cleared.*/
 void clear_sip(struct s_ip **sip)
 {
-	struct s_ip *cip = *sip;
-	for(*sip = NULL; cip != NULL; cip = cip->next)
+	struct s_ip *cip = sip ? *sip : NULL;
+	if(sip) { *sip = NULL; }
+	while(cip)
 	{
+		struct s_ip *next = cip->next;
 		add_garbage(cip);
+		cip = next;
 	}
 }
 

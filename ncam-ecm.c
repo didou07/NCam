@@ -1251,7 +1251,7 @@ void cleanup_ecmtasks(struct s_client *cl)
 	ECM_REQUEST *ecm;
 
 	// remove this clients ecm from queue. because of cache, just null the client:
-	cs_readlock(__func__, &ecmcache_lock);
+	cs_writelock(__func__, &ecmcache_lock);
 	for(ecm = ecmcwcache; ecm && cl; ecm = ecm->next)
 	{
 		if(ecm->client == cl)
@@ -1259,10 +1259,10 @@ void cleanup_ecmtasks(struct s_client *cl)
 			ecm->client = NULL;
 		}
 	}
-	cs_readunlock(__func__, &ecmcache_lock);
+	cs_writeunlock(__func__, &ecmcache_lock);
 
 	// remove client from rdr ecm-queue:
-	cs_readlock(__func__, &readerlist_lock);
+	cs_writelock(__func__, &readerlist_lock);
 	struct s_reader *rdr = first_active_reader;
 	while(rdr)
 	{
@@ -1280,7 +1280,7 @@ void cleanup_ecmtasks(struct s_client *cl)
 		}
 		rdr = rdr->next;
 	}
-	cs_readunlock(__func__, &readerlist_lock);
+	cs_writeunlock(__func__, &readerlist_lock);
 
 }
 
@@ -2819,17 +2819,22 @@ int32_t write_ecm_answer(struct s_reader *reader, ECM_REQUEST *er, int8_t rc, ui
 			reader->ecmshealthtout = ((double) reader->ecmstout / (reader->ecmsok + reader->ecmsnok + reader->ecmstout)) * 100;
 		}
 
-		if(rc == E_FOUND && reader->old_ecm_enabled && reader->old_ecm_source == 0 && reader->crdr && !is_network_reader(reader) && reader->typ != R_EMU && reader->typ != R_CONSTCW && er->ecmlen > 0 && er->ecmlen <= MAX_ECM_SIZE)
+		if(rc == E_FOUND && reader->old_ecm_enabled && reader->crdr && !is_network_reader(reader) && reader->typ != R_EMU && reader->typ != R_CONSTCW)
 		{
-			if(!reader->old_ecm_valid)
+			struct s_client *reader_client = reader->client;
+			if(reader_client) { SAFE_MUTEX_LOCK(&reader_client->thread_lock); }
+			if(!reader->old_ecm_queued)
 			{
-				memcpy(reader->old_ecm_data, er->ecm, er->ecmlen);
-				reader->old_ecm_len = er->ecmlen;
-				reader->old_ecm_valid = 1;
-				reader->old_ecm_last_run = time(NULL);
+				if(reader->old_ecm_source == 0 && !reader->old_ecm_valid && er->ecmlen > 0 && er->ecmlen <= MAX_ECM_SIZE)
+				{
+					memcpy(reader->old_ecm_data, er->ecm, er->ecmlen);
+					reader->old_ecm_len = er->ecmlen;
+					reader->old_ecm_valid = 1;
+				}
+				if(reader->old_ecm_success_count < UINT32_MAX)
+					{ reader->old_ecm_success_count++; }
 			}
-			if(reader->old_ecm_trigger == 1 && reader->old_ecm_success_count < UINT32_MAX)
-				{ reader->old_ecm_success_count++; }
+			if(reader_client) { SAFE_MUTEX_UNLOCK(&reader_client->thread_lock); }
 		}
 
 		if(rc == E_FOUND && reader->resetcycle > 0)
@@ -3862,11 +3867,21 @@ int32_t ecmfmt(char *result, size_t size, uint16_t caid, uint16_t onid, uint32_t
 		switch(type)
 		{
 			case ECMFMT_NUMBER:
-				s += snprintf(result + s, size - s, ifmt, ivalue);
-				break;
-
 			case ECMFMT_STRING:
-				s += snprintf(result + s, size - s , sfmt != NULL ? sfmt : "%s", svalue);
+			{
+				if(s >= size)
+					break;
+				size_t remain = size - s;
+				int32_t wrote = (type == ECMFMT_NUMBER)
+					? snprintf(result + s, remain, ifmt, ivalue)
+					: snprintf(result + s, remain, sfmt != NULL ? sfmt : "%s", svalue);
+				if(wrote < 0)
+					break;
+				if((size_t)wrote >= remain)
+					{ s = size ? size - 1 : 0; }
+				else
+					{ s += (size_t)wrote; }
+			}
 				break;
 
 			case ECMFMT_CHAR:
