@@ -606,9 +606,11 @@ int8_t biss_ecm(struct s_reader *rdr, const uint8_t *ecm, uint16_t caid, uint16_
 	switch (caid)
 	{
 		case 0x2600:
+			if(!dw) return EMU_NOT_SUPPORTED;
 			return biss_mode1_ecm(rdr, ecm, caid, ecm_pid, dw, NULL);
 
 		case 0x2602:
+			if(!cw_ex) return EMU_NOT_SUPPORTED;
 			return biss_mode1_ecm(rdr, ecm, caid, ecm_pid, NULL, cw_ex);
 
 		case 0x2610:

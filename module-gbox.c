@@ -2493,6 +2493,8 @@ static void gbox_peer_idle (struct s_client *cl)
 	uint32_t ptime_elapsed, etime_elapsed;
 	struct s_client *proxy = get_gbox_proxy(cl->gbox_peer_id);
 	struct gbox_peer *peer;
+	if (!proxy || !proxy->gbox)
+		return;
 	peer = proxy->gbox;
 
 	if (proxy && proxy->gbox)

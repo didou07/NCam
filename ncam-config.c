@@ -1733,8 +1733,15 @@ static void down_line(char url[512], bool fs)
 
 	chunk.memory = malloc(1); // will be grown as needed by the realloc above
 	chunk.size = 0; // no data at this point
-	curl_global_init(CURL_GLOBAL_ALL);
+	if(!ncam_curl_global_init())
+		{ NULLFREE(chunk.memory); return; }
 	curl_handle = curl_easy_init(); // init the curl session
+	if(!curl_handle)
+	{
+		NULLFREE(chunk.memory);
+		cs_log("libcurl: easy handle initialization failed");
+		return;
+	}
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback); // send all data to this function
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk); // we pass our 'chunk' struct to the callback function
 
@@ -1784,7 +1791,6 @@ static void down_line(char url[512], bool fs)
 	}
 	curl_easy_cleanup(curl_handle); // cleanup curl stuff
 	if(chunk.memory) { NULLFREE(chunk.memory); }
-	curl_global_cleanup(); // we're done with libcurl, so clean it up
 }
 #endif
 

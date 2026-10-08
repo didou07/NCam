@@ -29,8 +29,16 @@ static uint8_t github(struct pvu_reader *pvu)
 	struct MemoryStruct chunk;
 	chunk.memory = malloc(1); // will be grown as needed by the realloc above
 	chunk.size = 0; // no data at this point
-	curl_global_init(CURL_GLOBAL_ALL);
+	if(!ncam_curl_global_init())
+		{ NULLFREE(chunk.memory); pvu->startTime[rdr] = time(NULL); return 0; }
 	curl_handle = curl_easy_init(); // init the curl session
+	if(!curl_handle)
+	{
+		cs_log("libcurl: easy handle initialization failed");
+		NULLFREE(chunk.memory);
+		pvu->startTime[rdr] = time(NULL);
+		return 0;
+	}
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback); // send all data to this function
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk); // we pass our 'chunk' struct to the callback function
 	char url[90] = "https://raw.githubusercontent.com/";
@@ -85,7 +93,6 @@ static uint8_t github(struct pvu_reader *pvu)
 	}
 	curl_easy_cleanup(curl_handle); // cleanup curl stuff
 	if(chunk.memory) { NULLFREE(chunk.memory); }
-	curl_global_cleanup(); // we're done with libcurl, so clean it up
 	pvu->startTime[rdr] = time(NULL);
 	return ret;
 }
@@ -101,8 +108,16 @@ static uint8_t linuxsat(struct pvu_reader *pvu)
 	struct MemoryStruct chunk;
 	chunk.memory = malloc(1); // will be grown as needed by the realloc above
 	chunk.size = 0; // no data at this point
-	curl_global_init(CURL_GLOBAL_ALL);
+	if(!ncam_curl_global_init())
+		{ NULLFREE(chunk.memory); pvu->startTime[rdr] = time(NULL); return 0; }
 	curl_handle = curl_easy_init(); // init the curl session
+	if(!curl_handle)
+	{
+		cs_log("libcurl: easy handle initialization failed");
+		NULLFREE(chunk.memory);
+		pvu->startTime[rdr] = time(NULL);
+		return 0;
+	}
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback); // send all data to this function
 	curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk); // we pass our 'chunk' struct to the callback function
 	char url[80] = "https://www.linuxsat-support.com/thread/152939";
@@ -215,7 +230,6 @@ static uint8_t linuxsat(struct pvu_reader *pvu)
 	}
 	curl_easy_cleanup(curl_handle); // cleanup curl stuff
 	if(chunk.memory) { NULLFREE(chunk.memory); }
-	curl_global_cleanup(); // we're done with libcurl, so clean it up
 	pvu->startTime[rdr] = time(NULL);
 	return ret;
 }

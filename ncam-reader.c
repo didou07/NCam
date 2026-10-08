@@ -158,7 +158,7 @@ static int32_t ecm_ratelimit_findspace(struct s_reader *reader, ECM_REQUEST *er,
 							if(ecm) // found in cache
 							{
 								// return controlword of the ecm sitting in the slot!
-								write_ecm_answer(reader, er, ecm->rc, ecm->rcEx, ecm->cw, NULL, 0, &ecm->cw_ex);
+								write_ecm_answer_ex(reader, er, ecm->rc, ecm->rcEx, ecm->cw, NULL, 0, &ecm->cw_ex, 0);
 							}
 							else
 							{

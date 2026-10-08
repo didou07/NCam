@@ -57,7 +57,18 @@ typedef struct
 } NCAM_COUNTRY_STATE;
 
 static NCAM_COUNTRY_STATE country_state = {0};
+static pthread_once_t country_lock_once = PTHREAD_ONCE_INIT;
+static bool country_lock_init_ok = false;
 extern char cs_confdir[];
+
+static void country_init_lock_once(void)
+{
+	if(pthread_rwlock_init(&country_state.lock, NULL) == 0)
+	{
+		country_state.lock_ready = true;
+		country_lock_init_ok = true;
+	}
+}
 
 static void country_set_status(const char *fmt, ...)
 {
@@ -225,24 +236,30 @@ static bool country_load_locked(void)
 
 
 #ifdef WITH_LIBCURL
-static pthread_mutex_t country_download_lock = PTHREAD_MUTEX_INITIALIZER;
-static bool country_curl_initialized = false;
-static pthread_mutex_t country_curl_init_lock = PTHREAD_MUTEX_INITIALIZER;
+#ifdef __CYGWIN__
+#include <sys/wait.h>
+#include <unistd.h>
 
-static bool country_curl_init_once(void)
+static bool country_download_file_external_curl(const char *url, const char *dest)
 {
-	bool ok = true;
-	if(pthread_mutex_lock(&country_curl_init_lock) != 0)
-		return false;
-	if(!country_curl_initialized)
+	if(!url || !*url || !dest || !*dest) return false;
+	pid_t pid = fork();
+	if(pid < 0) return false;
+	if(pid == 0)
 	{
-		ok = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
-		if(ok)
-			country_curl_initialized = true;
+		execlp("curl", "curl", "-fL", "--retry", "2", "--connect-timeout", "20", "--max-time", "180", "--silent", "--show-error", "--insecure", "-o", dest, url, (char *)NULL);
+		_exit(127);
 	}
-	pthread_mutex_unlock(&country_curl_init_lock);
-	return ok;
+	int status = 0;
+	while(waitpid(pid, &status, 0) < 0)
+	{
+		if(errno != EINTR) return false;
+	}
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
+#endif
+
+static pthread_mutex_t country_download_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static size_t country_curl_write_file(void *ptr, size_t size, size_t nmemb, void *userdata)
 {
@@ -262,14 +279,25 @@ static bool country_download_file(const char *url, const char *dest)
 #ifdef WITH_LIBCURL
 	if(!url || !*url || !dest || !*dest)
 		return false;
-	if(!country_curl_init_once())
-	{
-		cs_log("GeoIP download failed: libcurl initialization failed");
-		return false;
-	}
 	if(pthread_mutex_lock(&country_download_lock) != 0)
 	{
 		cs_log("GeoIP download failed: download lock initialization failed");
+		return false;
+	}
+
+#ifdef __CYGWIN__
+	if(country_download_file_external_curl(url, dest))
+	{
+		pthread_mutex_unlock(&country_download_lock);
+		return true;
+	}
+	unlink(dest);
+#endif
+
+	if(!ncam_curl_global_init())
+	{
+		pthread_mutex_unlock(&country_download_lock);
+		cs_log("GeoIP download failed: libcurl initialization failed");
 		return false;
 	}
 
@@ -407,8 +435,21 @@ int32_t ncam_country_download_db(char *out, size_t outlen)
 	memset(&testdb, 0, sizeof(testdb));
 	bool valid = ncam_mmdb_open(mmdb_path, &testdb) == NCAM_MMDB_OK;
 	if(valid) ncam_mmdb_close(&testdb);
-	if(valid && rename(mmdb_path, target) != 0) valid = false;
-	if(valid) country_refresh_status_locked();
+	if(valid)
+	{
+		/* Keep the destination replaceable on Windows/Cygwin where an open file may block rename(). */
+		country_close_locked();
+		if(rename(mmdb_path, target) != 0)
+		{
+			valid = false;
+			(void)country_load_locked();
+		}
+		else if(!country_load_locked())
+		{
+			valid = false;
+		}
+	}
+	country_refresh_status_locked();
 	SAFE_RWLOCK_UNLOCK(&country_state.lock);
 	unlink(mmdb_path);
 	if(!valid)
@@ -422,12 +463,9 @@ int32_t ncam_country_download_db(char *out, size_t outlen)
 }
 void ncam_country_init(void)
 {
-	if(!country_state.lock_ready)
-	{
-		if(pthread_rwlock_init(&country_state.lock, NULL) != 0)
-			return;
-		country_state.lock_ready = true;
-	}
+	pthread_once(&country_lock_once, country_init_lock_once);
+	if(!country_lock_init_ok)
+		return;
 	SAFE_RWLOCK_WRLOCK(&country_state.lock);
 	country_parse_config();
 	country_close_locked();

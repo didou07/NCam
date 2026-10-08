@@ -106,7 +106,7 @@ static int32_t network_message_send(int32_t handle, uint16_t *netMsgId, uint8_t 
 
 	head_size = (cl->ncd_proto == NCD_524) ? 8 : 12;
 
-	if(len < 3 || len + head_size > CWS_NETMSGSIZE || handle < 0)
+	if(!buffer || len < 3 || len + head_size > CWS_NETMSGSIZE || handle < 0)
 	{
 		return -1;
 	}
@@ -1343,7 +1343,7 @@ static void newcamd_send_dcw(struct s_client *client, ECM_REQUEST *er)
 {
 	int32_t len;
 	uint16_t cl_msgid;
-	uint8_t mbuf[19];
+	uint8_t mbuf[19] = {0};
 
 	if(!client->udp_fd)
 	{

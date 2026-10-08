@@ -13,6 +13,7 @@ char *get_gbox_filename(char *dest, size_t destlen, const char *filename);
 
 #ifdef WITH_LIBCURL
 #include <curl/curl.h>
+int32_t ncam_curl_global_init(void);
 struct MemoryStruct
 {
 	char *memory;

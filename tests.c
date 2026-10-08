@@ -64,8 +64,9 @@ struct test_type
 	const struct test_vec *test_vec; // Array of test vectors
 };
 
-static void run_parser_test(struct test_type *t)
+static int run_parser_test(struct test_type *t)
 {
+	int failures = 0;
 	memset(t->data, 0, t->data_sz);
 	memset(t->data_c, 0, t->data_sz);
 	printf("%s\n", t->desc);
@@ -87,6 +88,7 @@ static void run_parser_test(struct test_type *t)
 		{
 			printf(" [OK]\n");
 		} else {
+			failures++;
 			printf("\n");
 			printf(" === ERROR ===\n");
 			printf("  Input data:   \"%s\"\n", vec->in);
@@ -100,10 +102,12 @@ static void run_parser_test(struct test_type *t)
 		vec++;
 	}
 	t->clear_fn(t->data_c);
+	return failures;
 }
 
-void run_all_tests(void)
+int run_all_tests(void)
 {
+	int failures = 0;
 	ECM_WHITELIST ecm_whitelist, ecm_whitelist_c;
 	struct test_type ecm_whitelist_test =
 	{
@@ -147,7 +151,7 @@ void run_all_tests(void)
 			{ .in = NULL },
 		},
 	};
-	run_parser_test(&ecm_whitelist_test);
+	failures += run_parser_test(&ecm_whitelist_test);
 
 	ECM_HDR_WHITELIST ecm_hdr_whitelist, ecm_hdr_whitelist_c;
 	struct test_type ecm_hdr_whitelist_test =
@@ -196,7 +200,7 @@ void run_all_tests(void)
 			{ .in = NULL },
 		},
 	};
-	run_parser_test(&ecm_hdr_whitelist_test);
+	failures += run_parser_test(&ecm_hdr_whitelist_test);
 
 	TUNTAB tuntab, tuntab_c;
 	struct test_type tuntab_test =
@@ -226,7 +230,7 @@ void run_all_tests(void)
 			{ .in = NULL },
 		},
 	};
-	run_parser_test(&tuntab_test);
+	failures += run_parser_test(&tuntab_test);
 
 	FTAB ftab, ftab_c;
 	struct test_type ftab_test =
@@ -265,7 +269,7 @@ void run_all_tests(void)
 			{ .in = NULL },
 		},
 	};
-	run_parser_test(&ftab_test);
+	failures += run_parser_test(&ftab_test);
 
 	CAIDVALUETAB caidvaluetab, caidvaluetab_c;
 	struct test_type caidvaluetab_test =
@@ -304,7 +308,7 @@ void run_all_tests(void)
 			{ .in = NULL },
 		},
 	};
-	run_parser_test(&caidvaluetab_test);
+	failures += run_parser_test(&caidvaluetab_test);
 
 	CAIDTAB caidtab, caidtab_c;
 	struct test_type caidtab_test =
@@ -345,5 +349,7 @@ void run_all_tests(void)
 			{ .in = NULL },
 		},
 	};
-	run_parser_test(&caidtab_test);
+	failures += run_parser_test(&caidtab_test);
+	printf("Test summary: %d failure(s)\n", failures);
+	return failures;
 }

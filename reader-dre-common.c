@@ -585,7 +585,10 @@ exit_werr:
 
 void ReasmEMM82(uint8_t *emm)
 {
-	uint16_t dataLen = (uint16_t) (((emm[1] & 0xF) << 8) | emm[2]) + 5;
+	if(!emm) return;
+	uint16_t payloadLen = (uint16_t)(((emm[1] & 0xF) << 8) | emm[2]);
+	if(payloadLen < 5) return;
+	uint16_t dataLen = (uint16_t)(payloadLen + 5);
 	uint8_t emmbuf[dataLen];
 	uint32_t crc;
 
@@ -595,7 +598,8 @@ void ReasmEMM82(uint8_t *emm)
 	emmbuf[3] = ((emm[7] + 1) & 0x0F);
 	emmbuf[4] = 0;
 
-	memcpy(&emmbuf[5], &emm[7], dataLen);
+	size_t copyLen = (size_t)dataLen - 5U;
+	memcpy(&emmbuf[5], &emm[7], copyLen);
 
 	emmbuf[5] += 1;
 

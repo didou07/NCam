@@ -1372,7 +1372,7 @@ void distribute_ea(struct s_ecm_answer *ea)
 			{ ea_temp->er->localgenerated = 1; }
 #endif
 		// e.g. we cannot send timeout, because "ea_temp->er->client" could wait/ask other readers! Simply set not_found if different from E_FOUND!
-		write_ecm_answer(ea_temp->reader, ea_temp->er, (ea->rc==E_FOUND? E_FOUND : E_NOTFOUND), ea->rcEx, ea->cw, NULL, ea->tier, &ea->cw_ex);
+		write_ecm_answer_ex(ea_temp->reader, ea_temp->er, (ea->rc==E_FOUND? E_FOUND : E_NOTFOUND), ea->rcEx, ea->cw, NULL, ea->tier, &ea->cw_ex, 0);
 	}
 }
 
@@ -2447,6 +2447,11 @@ static void logCWtoFile(ECM_REQUEST *er, uint8_t *cw)
 
 int32_t write_ecm_answer(struct s_reader *reader, ECM_REQUEST *er, int8_t rc, uint8_t rcEx, uint8_t *cw, char *msglog, uint16_t used_cardtier, EXTENDED_CW* cw_ex)
 {
+	return write_ecm_answer_ex(reader, er, rc, rcEx, cw, msglog, used_cardtier, cw_ex, 1);
+}
+
+int32_t write_ecm_answer_ex(struct s_reader *reader, ECM_REQUEST *er, int8_t rc, uint8_t rcEx, uint8_t *cw, char *msglog, uint16_t used_cardtier, EXTENDED_CW* cw_ex, int8_t count_old_ecm)
+{
 	if(!reader || !er || !er->tps.time) { return 0; }
 
 	// drop too late answers, to avoid seg fault --> only answer until tps.time+((cfg.ctimeout+500)/1000+1) is accepted
@@ -2819,7 +2824,7 @@ int32_t write_ecm_answer(struct s_reader *reader, ECM_REQUEST *er, int8_t rc, ui
 			reader->ecmshealthtout = ((double) reader->ecmstout / (reader->ecmsok + reader->ecmsnok + reader->ecmstout)) * 100;
 		}
 
-		if(rc == E_FOUND && reader->old_ecm_enabled && reader->crdr && !is_network_reader(reader) && reader->typ != R_EMU && reader->typ != R_CONSTCW)
+		if(count_old_ecm && rc == E_FOUND && reader->old_ecm_enabled && reader->crdr && !is_network_reader(reader) && reader->typ != R_EMU && reader->typ != R_CONSTCW)
 		{
 			struct s_client *reader_client = reader->client;
 			if(reader_client) { SAFE_MUTEX_LOCK(&reader_client->thread_lock); }

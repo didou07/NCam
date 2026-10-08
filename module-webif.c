@@ -8550,8 +8550,10 @@ static char *send_ncam_cacheex(struct templatevars * vars, struct uriparams * pa
 #ifdef CS_CACHEEX_AIO
 		i++;
 		char classname[9];
-		snprintf(classname, 8, "class%02d", i) < 0 ? abort() : (void)0;
-		classname[8] = '\0';
+		int class_rc = snprintf(classname, sizeof(classname), "class%02d", i);
+		if(class_rc < 0)
+			cs_strncpy(classname, "class00", sizeof(classname));
+		classname[sizeof(classname) - 1] = '\0';
 		tpl_addVar(vars, TPLADD, "CLASSNAME", classname);
 #endif
 		if(cl->typ == 'c' && cl->account && cl->account->cacheex.mode)
@@ -9388,9 +9390,7 @@ static int8_t check_httpdyndns(IN_ADDR_T addr)
 
 static int8_t check_valid_origin(IN_ADDR_T addr)
 {
-	if(!ncam_country_access_allowed(addr))
-		{ return 0; }
-
+	// WebIF access is controlled by httpallowed/httpdyndns and Failban; country access is for client services.
 	// check whether requesting IP is in allowed IP ranges
 	if(check_ip(cfg.http_allowed, addr))
 		{ return 1; }
@@ -9624,6 +9624,7 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 			return 0;
 		}
 		int32_t authok = 0;
+		int8_t auth_header_seen = 0;
 		char expectednonce[(MD5_DIGEST_LENGTH * 2) + 1], opaque[(MD5_DIGEST_LENGTH * 2) + 1];
 		char auth_request_target[4097];
 		char authheadertmp[sizeof(AUTHREALM) + sizeof(expectednonce) + sizeof(opaque) + 100];
@@ -9802,6 +9803,7 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 			}
 			else if(!authok && len > 22 && strncasecmp(str1, "Authorization: Digest ", 22) == 0)
 			{
+				auth_header_seen = 1;
 				authok = check_auth(str1, method, auth_request_target, addr, expectednonce, opaque);
 			}
 			else if(len > 40 && strncasecmp(str1, "If-Modified-Since:", 18) == 0)
@@ -9821,6 +9823,10 @@ static int32_t process_request(FILE * f, IN_ADDR_T in)
 
 		if(cfg.http_user && cfg.http_pwd)
 		{
+			if(auth_header_seen && authok <= 0)
+			{
+				cs_add_violation_by_ip(addr, 0, cfg.http_user);
+			}
 			if(!authok || cs_strlen(opaque) != MD5_DIGEST_LENGTH * 2) { calculate_opaque(addr, opaque); }
 			if(authok != 2)
 			{
@@ -10448,7 +10454,7 @@ static void *http_server(void *UNUSED(d))
 		else
 		{
 			getpeername(s, (struct sockaddr *) &remote, &len);
-			if(!ncam_country_access_allowed(SIN_GET_ADDR(remote)) || cs_check_violation(SIN_GET_ADDR(remote), cfg.http_port))
+			if(cs_check_violation(SIN_GET_ADDR(remote), cfg.http_port))
 			{
 				close(s);
 				continue;

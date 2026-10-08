@@ -89,7 +89,12 @@ static void emu_add_entitlement(struct s_reader *rdr, uint16_t caid, uint32_t pr
 		item->end = 2147472000;
 		item->type = 0;
 		item->isKey = 1;
-		memcpy(item->name, keyName, 8);
+		memset(item->name, 0, sizeof(item->name));
+		if(keyName)
+		{
+			size_t name_len = strnlen(keyName, sizeof(item->name));
+			memcpy(item->name, keyName, name_len);
+		}
 		item->key = key;
 		item->keyLength = keyLength;
 		item->isData = isData;

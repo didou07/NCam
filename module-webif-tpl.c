@@ -639,6 +639,8 @@ void tpl_checkOneDirDiskRevisions(const char *subdir)
 		{
 			int8_t error = 1;
 			char *tplorg = tpl_getUnparsedTpl(tpl->tpl_name, 0, subdir);
+			if(!tplorg)
+				continue;
 			unsigned long checksum = 0, curchecksum = crc32(0L, (uint8_t *)tpl->tpl_data, tpl->tpl_data_len);
 			char *ifdefs = "", *pch1 = strstr(tplorg, "<!--NCam");
 			if(pch1 != NULL)

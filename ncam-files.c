@@ -218,17 +218,39 @@ char *get_gbox_filename(char *dest, size_t destlen, const char *filename)
 #endif
 
 #ifdef WITH_LIBCURL
+static pthread_once_t ncam_curl_once = PTHREAD_ONCE_INIT;
+static CURLcode ncam_curl_global_init_result = CURLE_FAILED_INIT;
+
+static void ncam_curl_global_init_once(void)
+{
+	ncam_curl_global_init_result = curl_global_init(CURL_GLOBAL_DEFAULT);
+}
+
+int32_t ncam_curl_global_init(void)
+{
+	pthread_once(&ncam_curl_once, ncam_curl_global_init_once);
+	return ncam_curl_global_init_result == CURLE_OK;
+}
+
 size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp)
 {
+	if(!contents || !userp || size == 0 || nmemb == 0 || nmemb > SIZE_MAX / size)
+		return 0;
 	size_t realsize = size * nmemb;
 	struct MemoryStruct *mem = (struct MemoryStruct *)userp;
-	mem->memory = realloc(mem->memory, mem->size + realsize + 1);
-	if(mem->memory == NULL)
+	if(mem->size > SIZE_MAX - realsize - 1)
+	{
+		cs_log("libcurl response exceeds addressable memory");
+		return 0;
+	}
+	char *grown = realloc(mem->memory, mem->size + realsize + 1);
+	if(grown == NULL)
 	{
 		/* out of memory! */
 		cs_log("not enough memory (realloc returned NULL)");
 		return 0;
 	}
+	mem->memory = grown;
 	memcpy(&(mem->memory[mem->size]), contents, realsize);
 	mem->size += realsize;
 	mem->memory[mem->size] = 0;
@@ -237,6 +259,7 @@ size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *user
 
 int curl(CURL *curl_handle, char *url)
 {
+	if(!ncam_curl_global_init() || !curl_handle || !url) { return 0; }
 	if(url[0] != 0x68 || url[1] != 0x74 || url[2] != 0x74 || url[3] != 0x70) { return 0; }
 
 	CURLcode res;
@@ -249,7 +272,12 @@ int curl(CURL *curl_handle, char *url)
   	curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, 0L); // Switch on full protocol/debug output while testing
   	curl_easy_setopt(curl_handle, CURLOPT_NOPROGRESS, 1L); // disable progress meter, set to 0L to enable it*/
 
-	headers = curl_slist_append(headers, "Accept: text/html"); 
+	headers = curl_slist_append(headers, "Accept: text/html");
+	if(!headers)
+	{
+		cs_log("libcurl: failed to allocate request headers");
+		return 0;
+	}
 	curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
 	if(strncmp(url, "https:", 6) == 0)
 	{
@@ -261,6 +289,7 @@ int curl(CURL *curl_handle, char *url)
 
 	res = curl_easy_perform(curl_handle); // get it!
 
+	int32_t ok = (res == CURLE_OK);
 	if(res != CURLE_OK) // check for errors
 	{
 		size_t len = cs_strlen(errbuf);
@@ -273,11 +302,9 @@ int curl(CURL *curl_handle, char *url)
 		{
 			cs_log("libcurl: (%d) %s", res , curl_easy_strerror(res));
 		}
-		return 0;
+		ok = 0;
 	}
-	else
-	{
-		return 1;
-	}
+	curl_slist_free_all(headers);
+	return ok;
 }
 #endif

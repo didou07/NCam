@@ -156,8 +156,18 @@ char *down_softcam(struct s_reader *rdr)
 		mkdir(tempkey, S_IRWXU);
 
 		CURL *curl_handle;
-		curl_global_init(CURL_GLOBAL_ALL);
+		if(!ncam_curl_global_init()) {
+			cs_log("libcurl global initialization failed");
+			NULLFREE(tempkey);
+			return NULL;
+		}
 		curl_handle = curl_easy_init(); // init the curl session
+		if(!curl_handle)
+		{
+			cs_log("libcurl: easy handle initialization failed");
+			NULLFREE(tempkey);
+			return NULL;
+		}
 		FILE *fp;
 		len += cs_strlen(EMU_KEY_FILENAME) + 1;
 		char tmp[len];
@@ -179,7 +189,6 @@ char *down_softcam(struct s_reader *rdr)
 			cs_log("ERROR: Can't open priority file %s", tmp);
 		}
 		curl_easy_cleanup(curl_handle); // cleanup curl stuff
-		curl_global_cleanup();
 		tempkey[cs_strlen(tempkey)] = '\0';
 	}
 

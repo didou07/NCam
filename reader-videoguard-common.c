@@ -172,17 +172,21 @@ void cCamCryptVG_GetCamKey(struct s_reader *reader, uint16_t *tb2)
 
 static void cCamCryptVG_PostProcess_Decrypt(struct s_reader *reader, uint8_t *rxbuff)
 {
+	if(!reader || !reader->csystem_data || !rxbuff) return;
 	switch(rxbuff[0])
 	{
 		case 0xD0:
+			if(rxbuff[4] < 64) return;
 			cCamCryptVG_Process_D0(reader, rxbuff, rxbuff + 5);
 			break;
 
 		case 0xD1:
+			if(rxbuff[4] < 1) return;
 			cCamCryptVG_Process_D1(reader, rxbuff, rxbuff + 5, rxbuff + rxbuff[4] + 5);
 			break;
 
 		case 0xD3:
+			if(rxbuff[4] < 16) return;
 			cCamCryptVG_Decrypt_D3(reader, rxbuff, rxbuff + 5, rxbuff + rxbuff[4] + 5);
 			break;
 	}
@@ -211,8 +215,9 @@ static void cCamCryptVG_Process_D0(struct s_reader *reader, const uint8_t *ins, 
 
 			for(count2 = 0; count2 < 32; count2++)
 			{
-				uint32_t rem = 0, divisor = key1[count2];
+					uint32_t rem = 0, divisor = key1[count2];
 				int8_t i;
+				if(divisor == 0) return;
 
 				for(i = 31; i >= 0; i--)
 				{
@@ -276,10 +281,14 @@ static void cCamCryptVG_Process_D1(struct s_reader *reader, const uint8_t *ins, 
 		uint8_t in[16];
 		int32_t docalc = 1;
 
-		if(blocklen == i && (docalc = datalen & 0xf))
+		if(blocklen == i)
 		{
-			memset(in, 0, sizeof(in));
-			memcpy(in, &data[iblock], datalen - (datalen1 & ~0xf));
+			docalc = datalen & 0xf;
+			if(docalc)
+			{
+				memset(in, 0, sizeof(in));
+				memcpy(in, &data[iblock], (size_t)(datalen - (datalen1 & ~0xf)));
+			}
 		}
 		else if(blocklen + 1 == i)
 		{
