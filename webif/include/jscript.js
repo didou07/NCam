@@ -518,19 +518,233 @@ function is_nopoll(value) {
 /*
  * Userpage Functions: Update Page
  */
-function countryFlag(code) {
-	if (!code || code.length !== 2 || code === '--' || code === '??') return '';
-	code = code.toUpperCase();
-	if (!/^[A-Z]{2}$/.test(code)) return '';
-	return String.fromCodePoint(code.charCodeAt(0) + 127397, code.charCodeAt(1) + 127397);
+var countryGeoCache = Object.create(null);
+var countryGeoPending = Object.create(null);
+
+function countryCodeValid(code) {
+	code = String(code || '').toUpperCase();
+	return /^[A-Z]{2}$/.test(code) && code !== '--' && code !== '??';
+}
+
+function countryNormalizeIP(value) {
+	var ip = String(value || '').trim();
+	var at = ip.indexOf('@');
+	if (at >= 0) ip = ip.substring(0, at);
+	if (ip.length > 1 && ip.charAt(0) === '[' && ip.charAt(ip.length - 1) === ']') ip = ip.substring(1, ip.length - 1);
+	return ip.replace(/%[^%]+$/, '');
+}
+
+function countryPublicIPv4(ip) {
+	var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+	if (!m) return false;
+	var a = m.slice(1).map(Number);
+	if (a.some(function (n) { return n < 0 || n > 255; })) return false;
+	if (a[0] === 0 || a[0] === 10 || a[0] === 127 || a[0] >= 224) return false;
+	if (a[0] === 100 && a[1] >= 64 && a[1] <= 127) return false;
+	if (a[0] === 169 && a[1] === 254) return false;
+	if (a[0] === 172 && a[1] >= 16 && a[1] <= 31) return false;
+	if (a[0] === 192 && a[1] === 168) return false;
+	if (a[0] === 192 && a[1] === 0 && a[2] === 0 && a[3] !== 9 && a[3] !== 10) return false;
+	if (a[0] === 192 && a[1] === 0 && a[2] === 2) return false;
+	if (a[0] === 192 && a[1] === 88 && a[2] === 99) return false;
+	if (a[0] === 198 && (a[1] === 18 || a[1] === 19 || (a[1] === 51 && a[2] === 100))) return false;
+	if (a[0] === 203 && a[1] === 0 && a[2] === 113) return false;
+	return true;
+}
+
+function countryIPv6Words(ip) {
+	var address = String(ip || '').toLowerCase();
+	if (address.indexOf('.') >= 0) {
+		var lastColon = address.lastIndexOf(':');
+		if (lastColon < 0) return null;
+		var v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address.substring(lastColon + 1));
+		if (!v4) return null;
+		var octets = v4.slice(1).map(Number);
+		if (octets.some(function (n) { return n < 0 || n > 255; })) return null;
+		var hi = ((octets[0] << 8) | octets[1]).toString(16);
+		var lo = ((octets[2] << 8) | octets[3]).toString(16);
+		address = address.substring(0, lastColon + 1) + hi + ':' + lo;
+	}
+	if (!/^[0-9a-f:]+$/.test(address) || address.indexOf(':::') >= 0) return null;
+	var compressedAt = address.indexOf('::');
+	if (compressedAt !== address.lastIndexOf('::')) return null;
+	var left, right = [], missing;
+	if (compressedAt >= 0) {
+		left = address.substring(0, compressedAt) ? address.substring(0, compressedAt).split(':') : [];
+		right = address.substring(compressedAt + 2) ? address.substring(compressedAt + 2).split(':') : [];
+		missing = 8 - left.length - right.length;
+		if (missing < 1) return null;
+	} else {
+		left = address.split(':');
+		missing = 0;
+		if (left.length !== 8) return null;
+	}
+	var parts = left.slice();
+	for (var z = 0; z < missing; z++) parts.push('0');
+	parts = parts.concat(right);
+	if (parts.length !== 8) return null;
+	var words = [];
+	for (var i = 0; i < parts.length; i++) {
+		if (!/^[0-9a-f]{1,4}$/.test(parts[i])) return null;
+		words.push(parseInt(parts[i], 16));
+	}
+	return words;
+}
+
+function countryPublicIP(value) {
+	var ip = countryNormalizeIP(value);
+	if (countryPublicIPv4(ip)) return true;
+	if (ip.indexOf(':') < 0) return false;
+	var words = countryIPv6Words(ip);
+	if (!words) return false;
+	var zeroPrefix = true;
+	for (var i = 0; i < 5; i++) if (words[i] !== 0) zeroPrefix = false;
+	if (zeroPrefix && words[5] === 65535) {
+		return countryPublicIPv4([
+			(words[6] >> 8) & 255, words[6] & 255,
+			(words[7] >> 8) & 255, words[7] & 255
+		].join('.'));
+	}
+	var allZero = true;
+	for (var j = 0; j < 8; j++) if (words[j] !== 0) allZero = false;
+	if (allZero || (words[0] === 0 && words[1] === 0 && words[2] === 0 && words[3] === 0 && words[4] === 0 && words[5] === 0 && words[6] === 0 && words[7] === 1)) return false;
+	/* Public IPv6 unicast allocations are in 2000::/3. */
+	if ((words[0] & 57344) !== 8192) return false;
+	if (words[0] === 8193 && words[1] === 3512) return false; /* 2001:db8::/32 documentation range */
+	return true;
+}
+
+function countryCanonicalLookupIP(value) {
+	var ip = countryNormalizeIP(value);
+	if (ip.indexOf(':') < 0) return ip;
+	var words = countryIPv6Words(ip);
+	if (!words) return ip;
+	for (var i = 0; i < 5; i++) if (words[i] !== 0) return ip;
+	if (words[5] !== 65535) return ip;
+	return [
+		(words[6] >> 8) & 255, words[6] & 255,
+		(words[7] >> 8) & 255, words[7] & 255
+	].join('.');
+}
+
+function countryFetchJSON(url, timeoutMs) {
+	if (typeof window.fetch !== 'function') return Promise.resolve(null);
+	return new Promise(function (resolve) {
+		var finished = false;
+		var controller = typeof window.AbortController === 'function' ? new window.AbortController() : null;
+		var timer = setTimeout(function () {
+			if (controller) controller.abort();
+			if (!finished) { finished = true; resolve(null); }
+		}, timeoutMs || 3500);
+		function done(value) {
+			if (finished) return;
+			finished = true;
+			clearTimeout(timer);
+			resolve(value);
+		}
+		window.fetch(url, { cache: 'force-cache', signal: controller ? controller.signal : undefined })
+			.then(function (response) { return response && response.ok ? response.json() : null; })
+			.then(done).catch(function () { done(null); });
+	});
+}
+
+function countryLookupOnline(ip, index) {
+	/* Colons are valid in an IPv6 path segment; keep the canonical form. */
+	var q = ip.indexOf(':') >= 0 ? ip : encodeURIComponent(ip);
+	var providers = [
+		{ url: 'https://ipwho.is/' + q, parse: function (d) { return d && d.success !== false && d.country_code ? { code: d.country_code, name: d.country } : null; } },
+		{ url: 'https://ipapi.co/' + q + '/json/', parse: function (d) { return d && !d.error && d.country_code ? { code: d.country_code, name: d.country_name } : null; } },
+		{ url: 'https://geolocation-db.com/json/' + q, parse: function (d) { return d && d.country_code && d.country_code !== 'Not found' ? { code: d.country_code, name: d.country_name } : null; } }
+	];
+	if (index >= providers.length) return Promise.resolve(null);
+	return countryFetchJSON(providers[index].url, 3500).then(function (data) {
+		var result = null;
+		try { result = providers[index].parse(data); } catch (e) { result = null; }
+		if (result && countryCodeValid(String(result.code || '').toUpperCase())) {
+			result.code = String(result.code).toUpperCase();
+			return result;
+		}
+		return countryLookupOnline(ip, index + 1);
+	});
+}
+
+function renderCountryFlagElement(el) {
+	if (!el) return;
+	var code = String(el.getAttribute('data-country') || '').toUpperCase();
+	var ip = countryCanonicalLookupIP(el.getAttribute('data-ip') || '');
+	var hasLocalCode = countryCodeValid(code);
+	function draw(country) {
+		if (!el) return;
+		var cc = country && countryCodeValid(country.code) ? String(country.code).toUpperCase() : '';
+		if (cc) {
+			el.setAttribute('data-country', cc);
+			if (country.name) el.title = country.name;
+			if (el.getAttribute('data-rendered-country') === cc) return;
+			el.setAttribute('data-rendered-country', cc);
+			var img = document.createElement('img');
+			img.src = 'https://flagcdn.com/' + cc.toLowerCase() + '.svg';
+			img.width = 24;
+			img.height = 16;
+			img.alt = cc;
+			img.loading = 'lazy';
+			img.style.width = '24px';
+			img.style.height = '16px';
+			img.style.objectFit = 'contain';
+			img.style.verticalAlign = 'middle';
+			img.style.borderRadius = '2px';
+			img.onerror = function () {
+				if (el && el.getAttribute('data-rendered-country') === cc) el.textContent = cc;
+			};
+			el.textContent = '';
+			el.appendChild(img);
+		} else if (!hasLocalCode) {
+			el.removeAttribute('data-rendered-country');
+			el.textContent = '—';
+		}
+	}
+	/* Trust a valid local MMDB result. Online services are fallback-only: they
+	 * should not overwrite a valid country with a conflicting/stale API result,
+	 * nor receive every connected client's public IP unnecessarily. */
+	if (hasLocalCode) {
+		draw({ code: code, name: el.getAttribute('title') || code });
+		return;
+	}
+	if (!countryPublicIP(ip)) {
+		draw(null);
+		return;
+	}
+	if (countryGeoCache[ip] && countryGeoCache[ip].expires > Date.now()) {
+		if (countryGeoCache[ip].value) draw(countryGeoCache[ip].value);
+		else if (!hasLocalCode) draw(null);
+		return;
+	}
+	var applyOnlineResult = function (result) {
+		if (result) draw(result);
+		else if (!hasLocalCode) draw(null);
+	};
+	if (countryGeoPending[ip]) {
+		countryGeoPending[ip].push(applyOnlineResult);
+		return;
+	}
+	countryGeoPending[ip] = [applyOnlineResult];
+	function finishCountryLookup(result) {
+		var value = result ? { code: result.code, name: result.name || result.code } : null;
+		countryGeoCache[ip] = { value: value, expires: Date.now() + (value ? 86400000 : 600000) };
+		var waiters = countryGeoPending[ip] || [];
+		delete countryGeoPending[ip];
+		waiters.forEach(function (fn) { fn(value); });
+	}
+	try {
+		countryLookupOnline(ip, 0).then(finishCountryLookup, function () { finishCountryLookup(null); });
+	} catch (e) {
+		finishCountryLookup(null);
+	}
 }
 
 function renderCountryFlags(root) {
 	var scope = root || document;
-	$(scope).find('.country_flag[data-country]').each(function () {
-		var $flag = $(this);
-		var code = ($flag.attr('data-country') || '').toUpperCase();
-		$flag.text(countryFlag(code));
+	$(scope).find('.country_flag[data-country], .country_flag[data-ip]').each(function () {
+		renderCountryFlagElement(this);
 	});
 }
 
@@ -568,7 +782,9 @@ function updateUserpage(data) {
 					.html("<B>" + item.user.status + "</B><br>" + item.user.ip);
 			}
 			if (!is_nopoll('usercol26')) {
-				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr({'data-country': item.user.country || '', 'title': item.user.countryname || ''}).text(countryFlag(item.user.country)));
+				var $userCountryFlag = $('<span class="country_flag">').attr({'data-country': item.user.country || '', 'data-ip': item.user.ip || '', 'title': item.user.countryname || ''});
+				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($userCountryFlag);
+				renderCountryFlagElement($userCountryFlag[0]);
 			}
 
 			if (!is_nopoll('usercol3')) {
@@ -711,7 +927,9 @@ function updateUserpage(data) {
 					.html("<B>" + item.user.status + "</B><br>" + item.user.ip);
 			}
 			if (!is_nopoll('usercol26')) {
-				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($('<span class="country_flag">').attr({'data-country': item.user.country || '', 'title': item.user.countryname || ''}).text(countryFlag(item.user.country)));
+				var $userCountryFlag = $('<span class="country_flag">').attr({'data-country': item.user.country || '', 'data-ip': item.user.ip || '', 'title': item.user.countryname || ''});
+				$(uid + " td.usercol26").data('sort-value', item.user.country).empty().append($userCountryFlag);
+				renderCountryFlagElement($userCountryFlag[0]);
 			}
 
 			if (!is_nopoll('usercol3')) {
@@ -1364,7 +1582,9 @@ function updateStatuspage(data) {
 		}
 		if (!is_nopoll('statuscol17')) {
 			var countryCode = (typeof item.connection.country === 'string' && item.connection.country.length === 2 && item.connection.country !== '??' && item.connection.country !== '--') ? item.connection.country.toUpperCase() : '';
-			$(uid + " > td.statuscol17").empty().append($('<span class="country_flag">').attr({'data-country': countryCode, 'title': item.connection.countryname || ''}).text(countryFlag(countryCode)));
+			var $statusCountryFlag = $('<span class="country_flag">').attr({'data-country': countryCode, 'data-ip': item.connection.ip || '', 'title': item.connection.countryname || ''});
+			$(uid + " > td.statuscol17").empty().append($statusCountryFlag);
+			renderCountryFlagElement($statusCountryFlag[0]);
 		}
 		if (!is_nopoll('statuscol8')) {
 			$(uid + " > td.statuscol8").text(item.connection.port);

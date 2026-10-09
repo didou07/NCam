@@ -149,17 +149,41 @@ const char *ncam_country_name(const char *code)
 	return name ? name : "Unknown";
 }
 
+static bool country_ipv4_local_or_private(uint32_t v)
+{
+	/* v is in host byte order. */
+	return ((v >> 24) == 10) || ((v >> 20) == 0xAC1) ||
+		((v >> 16) == 0xC0A8) || ((v >> 24) == 127) ||
+		((v >> 16) == 0xA9FE);
+}
+
+#ifdef IPV6SUPPORT
+static bool country_ipv4_mapped(IN_ADDR_T ip)
+{
+	return IN6_IS_ADDR_V4MAPPED(&ip) != 0;
+}
+
+static uint32_t country_mapped_ipv4_host(IN_ADDR_T ip)
+{
+	uint32_t address;
+	memcpy(&address, &ip.s6_addr[12], sizeof(address));
+	return ntohl(address);
+}
+#endif
+
 static bool country_local_or_private(IN_ADDR_T ip)
 {
 #ifdef IPV6SUPPORT
-	if(IN6_IS_ADDR_LOOPBACK(&ip) || IN6_IS_ADDR_LINKLOCAL(&ip))
+	/* Dual-stack sockets represent IPv4 peers as ::ffff:a.b.c.d. */
+	if(country_ipv4_mapped(ip))
+		return country_ipv4_local_or_private(country_mapped_ipv4_host(ip));
+	if(IN6_IS_ADDR_UNSPECIFIED(&ip) || IN6_IS_ADDR_LOOPBACK(&ip) || IN6_IS_ADDR_LINKLOCAL(&ip))
 		return true;
 	if((ip.s6_addr[0] & 0xFE) == 0xFC)
 		return true;
 	return false;
 #else
-	uint32_t v = ntohl(ip);
-	return ((v >> 24) == 10) || ((v >> 20) == 0xAC1) || ((v >> 16) == 0xC0A8) || ((v >> 24) == 127) || ((v >> 16) == 0xA9FE);
+	return country_ipv4_local_or_private(ntohl(ip));
 #endif
 }
 
@@ -503,7 +527,8 @@ int32_t ncam_country_lookup(IN_ADDR_T ip, char code[NCAM_COUNTRY_CODE_STR_LEN])
 	uint8_t address[16] = {0};
 #ifdef IPV6SUPPORT
 	memcpy(address, ip.s6_addr, sizeof(address));
-	bool is_ipv6 = true;
+	/* IPv4-mapped peers must use the MMDB IPv4 subtree, not the IPv6 tree. */
+	bool is_ipv6 = !country_ipv4_mapped(ip);
 #else
 	memcpy(address + 12, &ip, sizeof(ip));
 	bool is_ipv6 = false;
